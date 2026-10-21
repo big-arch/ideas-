@@ -9,7 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
 from urllib.request import Request, build_opener, HTTPCookieProcessor, urlopen
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,7 +40,7 @@ class LocalApp:
         with self.opener.open(ORIGIN + '/api/state', timeout=30) as r:
             self.csrf = json.load(r)['csrf']
 
-    def request(self, value):
+    def request(self, value, *, retry=True):
         if not valid_request(value): return {'code': 400, 'value': {'error': 'Действие недоступно'}}
         with self.lock:
             if not self.csrf: self.connect()
@@ -55,12 +55,20 @@ class LocalApp:
             code = error.code
             try: result = json.loads(error.read())
             except ValueError: result = {'error': 'Приложение не ответило'}
-            if code == 401: self.csrf = ''
+            if code == 401:
+                self.csrf = ''
+                if retry and 'data' not in value: return self.request(value,retry=False)
         if value['path'] == '/api/state' and code == 200:
             # Never send the desktop session/CSRF or account identity to a browser.
             result['csrf'] = 'telegram'
             result['chatgpt'] = {'connected': bool(result.get('chatgpt', {}).get('connected'))}
             result['auth_progress'] = {}
+            # Bootstrap the first list in the same cloud round trip as settings.
+            category = next((p['category'] for p in result.get('profiles',[])
+                if p['id']==result.get('active_profile')),result.get('category','garage'))
+            path = '/api/list?'+urlencode({'category':category,'sort':result.get('sort','price_asc'),'view':result.get('view','all')})
+            feed = self.request({'path':path})
+            if feed['code']==200: result['initial_list'] = {'path':path,'value':feed['value']}
         return {'code': code, 'value': result}
 
 

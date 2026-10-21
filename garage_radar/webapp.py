@@ -7,6 +7,7 @@ import json
 import secrets
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 import jwt
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,12 +15,12 @@ from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 
 from . import chatgpt
-from .advisor import analyze
+from .advisor import analyze, current_report
 from .analysis import assess
 from .avito import SourceUnavailable
 from .config import load_config, load_env
 from .details import read_detail
-from .models import CATEGORIES
+from .models import CATEGORIES, utc_now, timestamp
 from .network import RemoteError, photo_bytes
 from .presentation import ranked_feed, price_label
 from .sources import source_name
@@ -34,6 +35,32 @@ SESSIONS = {}
 PENDING_SIGN_INS = {}
 SIGN_IN_LOCK = threading.Lock()
 ANALYSIS_LOCK = threading.Lock()
+DETAIL_WORKERS = ThreadPoolExecutor(max_workers=3, thread_name_prefix='listing-details')
+DETAIL_PENDING = set()
+DETAIL_LOCK = threading.Lock()
+
+
+def quick_detail(item, store):
+    """Serve known facts immediately; a slow source must not block opening a card."""
+    try: cached = json.loads(store.get_state('detail:'+item.id,'null'))
+    except ValueError: cached = None
+    if cached:
+        try:
+            if (utc_now()-timestamp(cached['fetched_at'])).total_seconds()<21600: return cached
+        except (ValueError,KeyError): pass
+    key = (str(store.path),item.id)
+    with DETAIL_LOCK:
+        if key not in DETAIL_PENDING:
+            DETAIL_PENDING.add(key)
+            def fetch():
+                try: read_detail(item,store)
+                except (SourceUnavailable,OSError,ValueError): pass
+                finally:
+                    with DETAIL_LOCK: DETAIL_PENDING.discard(key)
+            DETAIL_WORKERS.submit(fetch)
+    return cached or {'description':item.description,'params':item.attributes.get('visible_params',''),
+        'photos':[item.photo_url] if item.photo_url else [],'scope':'catalog','pending':True,
+        'error':'Полная страница загружается в фоне. Сейчас показаны сведения каталога.'}
 
 
 def register_sign_in(pending):
@@ -92,6 +119,9 @@ class Handler(BaseHTTPRequestHandler):
         value = item.to_dict()
         value["source"] = source_name(item)
         value["comparison"] = price_label(result) if result else ""
+        value['price_analysis'] = ({'discount':result.discount,'status':result.status,
+            'comparables':len(result.comparable_ids),'reference_price':result.reference_price,
+            'scope':result.comparison_scope,'reason':result.reason} if result else None)
         meta = self.server.store.listing_meta(self.user_id(),item.id)
         value['meta'] = {**meta,'watching':watched(meta)}
         value["favorite"] = bool(meta['favorite'])
@@ -181,10 +211,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply({"items": [self.serialize(r.listing, r) for r in results[:150]], "count": len(results)})
             elif path.path == "/api/item":
                 item = self.item(args.get("id"))
-                try: detail = read_detail(item, store)
-                except SourceUnavailable as error:
-                    detail = {"description": item.description, "params": item.attributes.get("visible_params", ""),
-                              "photos": [item.photo_url] if item.photo_url else [], "scope": "catalog", "error": str(error)}
+                detail = quick_detail(item, store)
                 cached = json.loads(store.get_state("advisor:" + item.id, "null"))
                 if cached and cached.get('listing_price') != item.price_rub: cached = None
                 history, previous = [], None
@@ -192,6 +219,7 @@ class Handler(BaseHTTPRequestHandler):
                     if price != previous: history.append({'at':observed,'price':price})
                     previous = price
                 result = assess(item,store.all(),replace(config.search,category=item.category))
+                if not current_report(cached,result): cached = None
                 self.reply({"item": self.serialize(item,result), "detail": detail,"analysis": cached,'history':history[-30:]})
             elif path.path == "/photo":
                 item = self.item(args.get("id"))

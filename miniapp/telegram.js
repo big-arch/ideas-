@@ -3,6 +3,7 @@ const telegram = window.Telegram?.WebApp;
 const endpoint = 'https://renbakjudvdnkjvjujti.supabase.co/functions/v1/radar-miniapp';
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 let cloudRefreshBusy = false;
+const readCache = new Map(), readPending = new Map();
 
 async function cloudCall(path, options = {}) {
   if (!telegram?.initData) throw Error('Открой приложение кнопкой «Открыть приложение» в Telegram-боте.');
@@ -12,11 +13,31 @@ async function cloudCall(path, options = {}) {
   return value;
 }
 async function radarCloudApi(path, data) {
+  if(data!==undefined){
+    const onlySeen=path==='/api/meta'&&data.changes?.seen===true&&Object.keys(data.changes).length===1;
+    if(!onlySeen)readCache.clear();
+    const result=await cloudRequest(path,data);
+    if(onlySeen)for(const cached of readCache.values()){
+      for(const item of cached.value.items||[])if(item.id===data.id)item.meta=result.meta;
+      if(cached.value.item?.id===data.id)cached.value.item.meta=result.meta;
+    }
+    return result;
+  }
+  const cached=readCache.get(path);
+  if(cached&&Date.now()-cached.at<20000)return structuredClone(cached.value);
+  if(readPending.has(path))return structuredClone(await readPending.get(path));
+  const pending=cloudRequest(path).then(value=>{
+    if(value.initial_list){readCache.set(value.initial_list.path,{at:Date.now(),value:structuredClone(value.initial_list.value)});delete value.initial_list}
+    readCache.set(path,{at:Date.now(),value:structuredClone(value)});return value;
+  }).finally(()=>readPending.delete(path));
+  readPending.set(path,pending);return structuredClone(await pending);
+}
+async function cloudRequest(path, data) {
   if (path === '/api/connect' || path === '/api/disconnect') throw Error('Подключение ChatGPT управляется в приложении на твоём компьютере. Уже подключённый аккаунт работает и здесь.');
   const job = await cloudCall('/request', { method: 'POST', body: JSON.stringify({ path, ...(data === undefined ? {} : { data }) }) });
   const until = Date.now() + (path === '/api/analyze' ? 285000 : 100000);
   while (Date.now() < until) {
-    await pause(1000);
+    await pause(path==='/api/analyze'?1500:350);
     const result = await cloudCall('/result?id=' + encodeURIComponent(job.id));
     if (result.status === 'done' || result.status === 'failed') {
       const response = result.response || { code: 500, value: {} };
@@ -40,6 +61,7 @@ function theme() {
 async function refreshCloud() {
   if (cloudRefreshBusy || document.hidden || typeof state === 'undefined' || !state || analysisRunningFor) return;
   cloudRefreshBusy = true;
+  readCache.clear();
   const scroll = document.querySelector('.list')?.scrollTop;
   const count = visibleCount;
   try {

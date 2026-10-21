@@ -214,11 +214,14 @@ def models() -> list[dict]:
             for row in response.get("models", []) if row.get("visibility") == "list" and row.get("slug")]
 
 
-def respond(instructions: str, content: list, *, model: str, web: bool = False) -> dict:
+def respond(instructions: str, content: list, *, model: str, web: bool = False, require_web: bool = False) -> dict:
     if not model: raise ValueError("Выбери модель своего аккаунта в приложении")
     payload = {"model": model, "instructions": instructions, "input": [{"role": "user", "content": content}],
                "store": False, "stream": True}
     if web: payload["tools"] = [{"type": "web_search"}]
+    if require_web:
+        if not web: raise ValueError('Обязательный поиск требует web=True')
+        payload['tool_choice'] = 'required'
     request = Request(RESOURCE + "/responses", data=json.dumps(payload).encode(),
                       headers={"Content-Type": "application/json", "Authorization": "Bearer " + access_token()})
     output, citations, completed = [], [], False

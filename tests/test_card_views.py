@@ -11,6 +11,8 @@ from garage_radar.bot import Bot, card_keyboard
 from garage_radar.card_views import pages, section_card
 from garage_radar.config import Config, Search
 from garage_radar.storage import Store
+from garage_radar.advisor import REPORT_VERSION, price_evidence
+from garage_radar.analysis import assess
 from test_radar import FakeTelegram, listing
 
 
@@ -34,7 +36,8 @@ class CardViewTests(unittest.TestCase):
                                            'from': {'id': 123}, 'message': self.message}})
 
     def test_cached_analysis_edits_existing_photo_and_pages_without_new_posts(self):
-        self.store.set_state('advisor:target', json.dumps({'text': 'Проверка объекта\n' * 150, 'listing_price': self.item.price_rub, 'photos_analyzed': 1}))
+        result = assess(self.item,[self.item],Search())
+        self.store.set_state('advisor:target', json.dumps({'version':REPORT_VERSION,'price_evidence':price_evidence(result), 'text': 'Проверка объекта\n' * 150, 'listing_price': self.item.price_rub, 'photos_analyzed': 1}))
         self.click('ai:target')
         method, payload = self.api.calls[-1]
         self.assertEqual(method, 'editMessageCaption')

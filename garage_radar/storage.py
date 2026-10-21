@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from .models import Listing, timestamp
+from .models import Listing, timestamp, duplicate_key, utc_now
 
 
 class Store:
@@ -24,6 +25,10 @@ class Store:
                 CREATE TABLE IF NOT EXISTS notifications (
                     chat_id INTEGER, listing_id TEXT, price REAL,
                     PRIMARY KEY(chat_id, listing_id, price));
+                CREATE TABLE IF NOT EXISTS sent_objects (
+                    chat_id INTEGER, listing_id TEXT, identity TEXT NOT NULL,
+                    delivered_at TEXT NOT NULL, PRIMARY KEY(chat_id,listing_id));
+                CREATE INDEX IF NOT EXISTS sent_objects_identity ON sent_objects(chat_id,identity);
                 CREATE TABLE IF NOT EXISTS listing_state (
                     user_id TEXT, listing_id TEXT, seen INTEGER NOT NULL DEFAULT 0,
                     hidden INTEGER NOT NULL DEFAULT 0, favorite INTEGER NOT NULL DEFAULT 0,
@@ -186,6 +191,39 @@ class Store:
         with self.connection() as db:
             return db.execute("SELECT 1 FROM notifications WHERE chat_id=? AND listing_id=? AND price=?",
                               (chat_id, item.id, item.price_rub)).fetchone() is not None
+
+    @staticmethod
+    def object_identity(item: Listing) -> str:
+        key = duplicate_key(item)
+        return hashlib.sha256(json.dumps(key,ensure_ascii=False).encode()).hexdigest() if key else 'id:'+item.id
+
+    def delivered_ids(self, chat_id: int, pool: list[Listing]) -> set[str]:
+        with self.connection() as db:
+            rows = db.execute('SELECT listing_id,identity FROM sent_objects WHERE chat_id=?',(chat_id,)).fetchall()
+        ids, identities = {r[0] for r in rows}, {r[1] for r in rows}
+        return ids | {item.id for item in pool if self.object_identity(item) in identities}
+
+    def mark_delivered(self, chat_id: int, item: Listing) -> None:
+        with self.connection() as db:
+            db.execute('INSERT OR IGNORE INTO sent_objects VALUES (?,?,?,?)',
+                       (chat_id,item.id,self.object_identity(item),utc_now().isoformat()))
+
+    def migrate_deliveries(self, chat_id: int) -> None:
+        """Recover old deliveries from persisted post buttons, never guess by date."""
+        key = f'delivery_history_v1:{chat_id}'
+        if self.get_state(key): return
+        with self.connection() as db:
+            ids = {r[0] for r in db.execute('SELECT listing_id FROM notifications WHERE chat_id=?',(chat_id,))}
+            for (raw,) in db.execute('SELECT value FROM state WHERE key LIKE ?',(f'card_keyboard:{chat_id}:%',)):
+                try:
+                    for row in json.loads(raw).get('inline_keyboard',[]):
+                        for button in row:
+                            callback=button.get('callback_data','')
+                            if callback.startswith(('ai:','details:','favorite:')): ids.add(callback.split(':',1)[1])
+                except (ValueError,TypeError,AttributeError): continue
+        for item in self.all():
+            if item.id in ids: self.mark_delivered(chat_id,item)
+        self.set_state(key,'done')
 
     def mark_notified(self, chat_id: int, item: Listing) -> None:
         with self.connection() as db:

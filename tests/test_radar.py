@@ -249,7 +249,7 @@ class BotTests(unittest.TestCase):
         self.assertEqual(len(self.api.messages), 1)
         self.store.upsert([replace(listing(), price_rub=500000)])
         self.bot.scan()
-        self.assertEqual(len(self.api.messages), 2)
+        self.assertEqual(len(self.api.messages), 1)  # A price change does not repost the object.
 
     def test_stop_disables_notifications(self):
         self.update("/start")

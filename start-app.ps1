@@ -1,4 +1,4 @@
-param([switch]$Connect)
+param([switch]$Connect, [switch]$NoBrowser)
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
 $pidFile = Join-Path $projectRoot 'logs\app-process.json'
@@ -14,5 +14,5 @@ if (-not $runningApp) {
     Start-Sleep -Milliseconds 700
 }
 $appUrl = if ($Connect) { 'http://127.0.0.1:8766/?connect=1' } else { 'http://127.0.0.1:8766/' }
-Start-Process $appUrl
+if (-not $NoBrowser) { Start-Process $appUrl }
 Write-Output "Local application started, PID $($runningApp.Id)"

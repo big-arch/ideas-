@@ -15,7 +15,7 @@ import threading
 
 from .ai import summarize
 from . import chatgpt
-from .advisor import analyze
+from .advisor import analyze, current_report
 from .details import read_detail
 from .avito import PublicAvito, SourceUnavailable
 from .analysis import assess, render, shortlist
@@ -177,6 +177,7 @@ class Bot:
             raise ValueError("Нужны TELEGRAM_ALLOWED_CHAT_IDS или код привязки длиной от 20 символов")
         self.config, self.store, self.telegram = config, store, telegram
         self.allowed, self.model = allowed, model
+        for chat_id in allowed: self.store.migrate_deliveries(chat_id)
         self.pairing_code = pairing_code
         self.advisor_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="listing-advisor")
         self.advisor_pending = set()
@@ -189,6 +190,7 @@ class Bot:
 
     def publish(self, chat_id, result, keyboard):
         def remember(message):
+            self.store.mark_delivered(chat_id,result.listing)
             if isinstance(message,dict) and message.get('message_id'):
                 self.store.set_state(f"card_keyboard:{chat_id}:{message['message_id']}",json.dumps(keyboard,ensure_ascii=False))
             return message
@@ -200,7 +202,7 @@ class Bot:
         if not chatgpt.status()["connected"]:
             return remember(self.telegram.send_card(chat_id, result, keyboard))
         cached = json.loads(self.store.get_state("advisor:" + result.listing.id, "null"))
-        if cached and cached.get("listing_price") != result.listing.price_rub: cached = None
+        if not current_report(cached,result): cached = None
         message = self.telegram.send_card(chat_id, result, keyboard, cached)
         remember(message)
         key = (chat_id, result.listing.id, result.listing.price_rub)
@@ -236,7 +238,7 @@ class Bot:
         meta = self.store.set_listing_meta(chat_id,item.id,seen=True)
         saved = bool(meta['favorite'])
         report = json.loads(self.store.get_state('advisor:' + item.id, 'null'))
-        if report and report.get('listing_price') != item.price_rub:
+        if not current_report(report,result):
             report = None
 
         def update(text, keyboard):
@@ -331,6 +333,7 @@ class Bot:
 
     def send_digest(self, chat_id: int, *, automatic: bool = False, offset: int = 0, token: str = "") -> int:
         pool = self.store.all()
+        delivered = self.store.delivered_ids(chat_id,pool)
         state_key = f"digest_snapshot:{chat_id}"
         context = [active_profile(self.store,chat_id),self.store.get_state(f'view:{chat_id}','all'),self.sort_mode(chat_id)]
         if token:
@@ -363,11 +366,11 @@ class Bot:
         while position < len(ids) and len(results) < 10:
             item = by_id.get(ids[position])
             position += 1
-            if item is not None:
+            if item is not None and item.listing.id not in delivered:
                 results.append(item)
         if not results:
-            self.telegram.send(chat_id, "За последние 7 дней больше подходящих объявлений с доступной датой нет. "
-                               "Старые объявления и записи без даты не добавляю для количества.", CATEGORY_KEYBOARD)
+            if not automatic:
+                self.telegram.send(chat_id, "Новых подходящих объявлений пока нет. Уже отправленные не повторяю; старые и без даты исключены. Все объекты можно открыть в приложении.", CATEGORY_KEYBOARD)
             return 0
         rated = sum(r.discount is not None and r.status != "insufficient" for r in results)
         self.telegram.send(chat_id, f"📬 {'Автосводка' if automatic else 'Твоя сводка'} · {len(results)} объектов\n"
@@ -377,7 +380,7 @@ class Bot:
         for result in results:
             self.publish(chat_id, result, card_keyboard(result.listing))
         keyboard = {"inline_keyboard": [self.sorting_keyboard("digestsort")]}
-        if any(key in by_id for key in ids[position:]):
+        if any(key in by_id and key not in delivered for key in ids[position:]):
             keyboard["inline_keyboard"].insert(0, [{"text": "Ещё 10 объявлений", "callback_data": f"digestmore:{token}:{position}"}])
         self.telegram.send(chat_id, "Следующая порция и порядок объявлений:", keyboard)
         return len(results)
@@ -457,13 +460,15 @@ class Bot:
     def show_feed(self, chat_id: int, offset: int = 0, minimum_discount: float | None = None, token: str = '') -> None:
         search = self.search_for(chat_id)
         results = self.personal_results(chat_id,ranked_feed(self.store.all(), search, minimum_discount, recent_days=7, sort_mode=self.sort_mode(chat_id)))
+        delivered = self.store.delivered_ids(chat_id,[r.listing for r in results])
+        results = [r for r in results if r.listing.id not in delivered]
         key = f"feed:{chat_id}:{search.category}"
         self.store.set_state(key + ":filter", "" if minimum_discount is None else str(minimum_discount))
         if not results:
             if minimum_discount is not None:
                 message = f"Пока нет объявлений с рассчитанной разницей от {minimum_discount:.0%}.\nНажми «Все объявления», чтобы посмотреть остальные варианты."
             else:
-                message = "Пока нет объявлений с доступной датой за последние 7 дней. Источники обновляются; старые и без даты исключены."
+                message = "Новых объявлений за последние 7 дней пока нет. Уже отправленные не повторяю. Все объекты доступны в приложении."
             self.telegram.send(chat_id, message, CATEGORY_KEYBOARD)
             return
         snapshot_key = f'feed_snapshot:{chat_id}'
@@ -801,7 +806,7 @@ class Bot:
             results = shortlist(pool, self.search_for(chat_id))
             sent = 0
             for result in results:
-                if self.store.notified(chat_id, result.listing):
+                if result.listing.id in self.store.delivered_ids(chat_id,[result.listing]):
                     continue
                 try:
                     self.telegram.send_card(chat_id, result, card_keyboard(result.listing))
@@ -811,6 +816,7 @@ class Bot:
                         break
                     raise
                 self.store.mark_notified(chat_id, result.listing)
+                self.store.mark_delivered(chat_id, result.listing)
                 sent += 1
                 if sent >= 5:
                     break
@@ -855,9 +861,8 @@ def run_bot(config: Config, store: Store) -> None:
         raise ValueError("Telegram вернул идентификатор другого бота; запуск остановлен")
     url = miniapp_url()
     if url:
-        app_row = [{'text':'Открыть приложение','web_app':{'url':url}}]
-        if CATEGORY_KEYBOARD['keyboard'][0] != app_row:
-            CATEGORY_KEYBOARD['keyboard'].insert(0,app_row)
+        CATEGORY_KEYBOARD['keyboard'] = [row for row in CATEGORY_KEYBOARD['keyboard']
+            if not any(isinstance(button,dict) and button.get('web_app') for button in row)]
         menu = {'type':'web_app','text':'Открыть приложение','web_app':{'url':url}}
         menu_owners = set(allowed)
         paired_owner = store.get_state('owner_chat_id')

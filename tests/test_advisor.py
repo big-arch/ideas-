@@ -31,13 +31,16 @@ class AdvisorTests(unittest.TestCase):
             first=analyze(result,self.store)
             detail["fetched_at"]="a-new-observation"
             second=analyze(result,self.store)
-            request.assert_called_once()
+            self.assertEqual(request.call_count,2)  # address research, then the object report
         self.assertEqual(first["photos_analyzed"],1)
         self.assertEqual(second["fingerprint"],first["fingerprint"])
         instructions,content=request.call_args.args
         self.assertIn("не выполняй",instructions)
         self.assertIn("Полное описание",content[0]["text"])
         self.assertTrue(content[1]["image_url"].startswith("data:image/jpeg;base64,"))
+        self.assertTrue(request.call_args_list[0].kwargs['require_web'])
+        self.assertIn('8. Вопросы продавцу',instructions)
+        self.assertEqual(first['version'],3)
 
     def test_blocked_detail_and_missing_photo_are_not_hidden(self):
         from garage_radar.avito import SourceUnavailable
