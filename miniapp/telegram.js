@@ -65,7 +65,7 @@ async function refreshCloud() {
   const scroll = document.querySelector('.list')?.scrollTop;
   const count = visibleCount;
   try {
-    await loadList();
+    await loadList({background:true});
     visibleCount = count; renderRows();
     if (scroll !== undefined) document.querySelector('.list').scrollTop = scroll;
     if (selected && currentDetail) {
