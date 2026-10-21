@@ -17,3 +17,13 @@ alter table public.radar_bridge_jobs enable row level security;
 revoke all on public.radar_bridge_jobs from anon, authenticated;
 create index radar_bridge_jobs_pending on public.radar_bridge_jobs(status,created_at);
 grant all on public.radar_bridge_config, public.radar_bridge_jobs to service_role;
+
+-- Applied separately by radar_bridge_retention.
+create extension if not exists pg_cron;
+select cron.schedule('radar-bridge-retention', '* * * * *', $$
+  delete from public.radar_bridge_jobs
+    where created_at < now() - interval '23 hours 59 minutes';
+  delete from cron.job_run_details
+    where jobid = (select jobid from cron.job where jobname = 'radar-bridge-retention')
+    and end_time < now() - interval '1 day';
+$$);

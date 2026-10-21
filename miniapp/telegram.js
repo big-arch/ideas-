@@ -69,5 +69,14 @@ if (telegram) {
   });
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshCloud(); });
+document.addEventListener('DOMContentLoaded', () => {
+  if (telegram?.initData) return;
+  document.getElementById('connection').textContent = 'Вход через Telegram';
+  syncLabel('Данные доступны только владельцу бота');
+  document.getElementById('count').textContent = 'Открой Радар в Telegram';
+  document.getElementById('rows').innerHTML = '<div class="empty"><h2>Продолжить в Telegram</h2><p>Открой своего бота и нажми «Открыть приложение». Так Радар подтвердит, что это ты.</p><a href="https://t.me/money_ideas_business_bot" class="primary" style="display:inline-block;padding:12px 16px;border-radius:11px;text-decoration:none">Открыть бота</a></div>';
+  for (const id of ['sort','viewFilter','savedSearch','favoriteFilter','settingsButton']) document.getElementById(id).disabled = true;
+  document.getElementById('searchEditor').hidden = true;
+});
 setInterval(refreshCloud, 60000);
 
