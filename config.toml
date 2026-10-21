@@ -1,0 +1,20 @@
+[search]
+category = "garage"
+region = "Ростовская область"
+# Empty = all localities in the region; comparisons stay within each locality.
+locality = ""
+discount = 0.10
+min_comparables = 5
+max_age_days = 2
+area_tolerance = 0.20
+
+[runtime]
+database = "data/radar.sqlite3"
+poll_seconds = 60
+# Local JSONL exported by an agreed data supplier. Empty disables feed import.
+feed_file = ""
+
+[source]
+provider = "public_catalogs"
+# Up to three visible catalog pages per active category; back off on access errors.
+refresh_seconds = 900

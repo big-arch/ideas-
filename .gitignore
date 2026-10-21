@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.egg-info/
+.env
+data/
+*.sqlite3*
+dist/
+build/
+runtime/
+logs/
+miniapp/.git/
+miniapp/.sites-runtime/
+miniapp/.sites-checkout*/
