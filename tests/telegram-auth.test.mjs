@@ -37,4 +37,7 @@ test('bridge only permits business API paths',()=>{
   assert.equal(validRequest({path:'/api/list?category=garage'}),true);
   for(const path of ['/api/connect','/api/disconnect','//evil.example/api/state','/api/meta','/api/../api/connect','/.env'])assert.equal(validRequest({path}),false,path);
   assert.equal(validRequest({path:'/api/meta',data:{id:'ad',changes:{favorite:true}}}),true);
+  assert.equal(validRequest({path:'/api/chat',data:{text:'Lexus IS 200'}}),true);
+  assert.equal(validRequest({path:'/api/chat'}),false);
+  assert.equal(validRequest({path:'/api/chat',data:{text:'x'.repeat(8000)}}),false);
 });

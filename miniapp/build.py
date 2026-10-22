@@ -23,7 +23,7 @@ start = js.index('function photo(')
 end = js.index('\nfunction plain', start)
 js = js[:start] + 'function photo(id,index=0){return originalPhoto(id,index)}' + js[end:]
 (OUT / 'ui.js').write_text(js, encoding='utf-8')
-for name in ('ui.css', 'ui-workspace.js'):
+for name in ('ui.css', 'ui-workspace.js', 'ui-chat.js'):
     (OUT / name).write_bytes((SOURCE / name).read_bytes())
 (OUT / 'telegram.js').write_bytes((ROOT / 'telegram.js').read_bytes())
-print('Built Telegram Mini App (5 public assets)')
+print('Built Telegram Mini App (6 public assets)')

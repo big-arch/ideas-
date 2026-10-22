@@ -19,7 +19,7 @@ export async function telegramUser(raw, botId, ownerId, now = Date.now(), public
 }
 
 const READ = new Set(['/api/state', '/api/models', '/api/list', '/api/item']);
-const WRITE = new Set(['/api/model', '/api/favorite', '/api/meta', '/api/preferences', '/api/search/save', '/api/search/activate', '/api/search/delete', '/api/analyze']);
+const WRITE = new Set(['/api/model', '/api/favorite', '/api/meta', '/api/preferences', '/api/search/save', '/api/search/activate', '/api/search/delete', '/api/analyze', '/api/chat']);
 export function validRequest(value) {
   if (!value || typeof value.path !== 'string' || value.path.length > 2400 || /[\r\n\\#]/.test(value.path)) return false;
   const url = new URL(value.path, 'https://local.invalid');

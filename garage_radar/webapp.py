@@ -16,6 +16,8 @@ from urllib.parse import urlsplit, parse_qs
 
 from . import chatgpt
 from .advisor import analyze, current_report
+from .conversation import turn as conversation_turn
+from .location import listing_map
 from .analysis import assess
 from .avito import SourceUnavailable
 from .config import load_config, load_env
@@ -118,6 +120,7 @@ class Handler(BaseHTTPRequestHandler):
     def serialize(self, item, result=None):
         value = item.to_dict()
         value["source"] = source_name(item)
+        value['map'] = listing_map(item)
         value["comparison"] = price_label(result) if result else ""
         value['price_analysis'] = ({'discount':result.discount,'status':result.status,
             'comparables':len(result.comparable_ids),'reference_price':result.reference_price,
@@ -191,7 +194,7 @@ class Handler(BaseHTTPRequestHandler):
                             'category':store.category(self.user_id(),config.search.category),
                             "categories": CATEGORIES, "notice": session.pop("notice", ""),
                             "schedule": store.get_state("schedule:" + store.get_state("owner_chat_id"), "off")})
-            elif path.path in {"/ui.css", "/ui.js",'/ui-workspace.js'}:
+            elif path.path in {"/ui.css", "/ui.js", '/ui-workspace.js', '/ui-chat.js'}:
                 kind = "text/css; charset=utf-8" if path.path.endswith('.css') else "text/javascript; charset=utf-8"
                 self.reply((ROOT / 'garage_radar' / path.path[1:]).read_bytes(), kind=kind)
             elif path.path == "/api/models":
@@ -302,6 +305,13 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == '/api/search/delete':
                 store.delete_profile(self.user_id(),str(data.get('id','')))
                 self.reply({'profiles':store.profiles(self.user_id())})
+            elif self.path == '/api/chat':
+                ident = data.get('selected_id')
+                if ident is not None and (not isinstance(ident, str) or len(ident) > 80):
+                    raise ValueError('Некорректный объект')
+                reply = conversation_turn(store, config, self.user_id(), data.get('text'), selected_id=ident)
+                self.reply({'answer': reply['answer'], 'category': reply['category'], 'search_url': reply.get('search_url', ''),
+                    'items': [self.serialize(r.listing, r) for r in reply['results']]})
             elif self.path == "/api/analyze":
                 item = self.item(data.get("id"))
                 if not ANALYSIS_LOCK.acquire(blocking=False):

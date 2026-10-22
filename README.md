@@ -162,3 +162,10 @@ Akula public catalogs now cover Rostov-on-Don garages/parking spaces, apartments
 Source scans run in a single background worker, leaving Telegram callbacks responsive. The status command shows the selected category, per-source fresh counts and Moscow time, and reports ChatGPT separately from the Ollama fallback. Delivery selection and sending are locked to avoid a manual/scheduled race.
 
 Cities outside Rostov-on-Don use an orange location badge with a slow pulsing dot in the Mini App (disabled by reduced-motion preferences). Telegram posts use a static warning. Price comparison badges display signed percentages and comparable counts; insufficient or dispersed samples show an explicit absence of an estimate. These are asking-price comparisons, not verified transaction prices.
+
+
+### Conversational search and map
+
+Plain messages in Telegram and the Mini App assistant now share a local per-owner conversation context (last eight messages). ChatGPT converts requests into a validated category, exact keywords, city and budget, then explains only real matched listings. Follow-ups retain filters; numbered references use the latest returned results. A public Avito keyword page is attempted with normal rate limits; blocked or changed markup falls back to the database and a link to the original search. Source dates older than seven days and previously shown/delivered objects are excluded. Results are ordered by total asking price, up to ten per request. Search availability is not a claim of full market coverage. The conversation lease prevents simultaneous Telegram and Mini App turns from overwriting context.
+
+There are two object tabs: facts and a single AI analysis containing vehicle checks, photos, risks and neighborhood information where applicable. The location accordion embeds Yandex address search from the seller address and offers an external map link. It explicitly does not claim verified coordinates. Chat and source text are escaped in the interface. The existing signed Telegram owner check and bridge allowlist protect the new chat endpoint.

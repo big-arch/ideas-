@@ -16,6 +16,7 @@ import threading
 from .ai import summarize
 from . import chatgpt
 from .advisor import analyze, current_report
+from .conversation import turn as conversation_turn
 from .details import read_detail
 from .avito import PublicAvito, SourceUnavailable
 from .analysis import assess, render, shortlist
@@ -183,12 +184,36 @@ class Bot:
         self.advisor_pending = set()
         self.advisor_lock = threading.Lock()
         self.delivery_lock = threading.Lock()
+        self.chat_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="listing-chat")
+        self.chat_queued = 0
         self.source = PublicAvito(config.source_refresh_seconds) if config.source in {"avito_public", "public_catalogs"} else None
         self.sources = [("Авито", self.source)] if self.source else []
         if config.source == "public_catalogs":
             self.sources += [("Яндекс Недвижимость", PublicCatalog("yandex", config.source_refresh_seconds)),
                              ("Дром", PublicCatalog("drom", config.source_refresh_seconds)),
                              ("Акула", PublicCatalog("akula", config.source_refresh_seconds))]
+
+    def chat_message(self, chat_id, text):
+        with self.advisor_lock:
+            if self.chat_queued >= 3:
+                self.telegram.send(chat_id, "Дождись ответа ИИ: в очереди уже есть сообщения.")
+                return
+            self.chat_queued += 1
+        def complete():
+            try:
+                self.telegram.call('sendChatAction', {'chat_id': chat_id, 'action': 'typing'})
+                reply = conversation_turn(self.store, self.config, chat_id, text)
+                keyboard = {'inline_keyboard': [[{'text': 'Открыть поиск на Авито', 'url': reply['search_url']}]]} if reply.get('search_url') else None
+                self.telegram.send(chat_id, reply['answer'], keyboard)
+                for result in reply['results']:
+                    self.publish(chat_id, result, card_keyboard(result.listing))
+            except ValueError as error:
+                self.telegram.send(chat_id, str(error)[:400])
+            except (RemoteError, SourceUnavailable):
+                self.telegram.send(chat_id, 'ИИ или источник не ответил. Попробуй запрос ещё раз; объявления не выдумываются.')
+            finally:
+                with self.advisor_lock: self.chat_queued -= 1
+        self.chat_worker.submit(complete)
 
     def publish(self, chat_id, result, keyboard):
         # Scheduled scans and Telegram commands can select the same object concurrently.
@@ -667,6 +692,9 @@ class Bot:
             self.store.set_category(chat_id, selected)
             self.telegram.send(chat_id, f"{CATEGORIES[selected]} · Ростовская область\nПоказываю объявления с ценами и фотографиями.", CATEGORY_KEYBOARD)
             self.show_feed(chat_id)
+            return
+        if not text.startswith('/'):
+            self.chat_message(chat_id, text)
             return
         search = self.search_for(chat_id)
         if command == "/category":

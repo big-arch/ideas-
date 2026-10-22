@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlencode
 from urllib.request import urlopen
 
 from .models import Listing, normalized, utc_now
@@ -269,15 +269,19 @@ class PublicAvito:
         self.due: dict[str, float] = {}
         self.max_pages = min(3, max(1, max_pages))
 
-    def fetch(self, category: str) -> list[Listing] | None:
+    def fetch(self, category: str, *, query: str = "") -> list[Listing] | None:
+        if not isinstance(query, str) or len(query) > 160 or category not in PATHS:
+            raise ValueError("Некорректный поисковый запрос")
+        key = category + ":" + query.casefold().strip()
         now = time.monotonic()
-        if now < self.due.get(category, 0):
+        if now < self.due.get(key, 0):
             return None
-        self.due[category] = now + self.refresh_seconds
+        self.due[key] = now + self.refresh_seconds
         url = "https://www.avito.ru/rostovskaya_oblast/" + PATHS[category]
+        if query.strip(): url += "?" + urlencode({"q": query.strip()})
         try:
             items: dict[str, Listing] = {}
-            for page in range(self.max_pages):
+            for page in range(1 if query else self.max_pages):
                 with urlopen(url, timeout=25) as response:
                     body = response.read(10_000_001)
                     if len(body) > 10_000_000:
@@ -297,10 +301,10 @@ class PublicAvito:
                     time.sleep(1)
             return list(items.values())
         except HTTPError as error:
-            self.due[category] = now + 3600
+            self.due[key] = now + 3600
             raise SourceUnavailable(f"Авито недоступен, HTTP {error.code}. Повтор отложен, обход защиты не используется") from None
         except (URLError, TimeoutError, OSError, UnicodeError):
             raise SourceUnavailable("Не удалось прочитать публичную страницу Авито") from None
         except SourceUnavailable:
-            self.due[category] = now + 3600
+            self.due[key] = now + 3600
             raise

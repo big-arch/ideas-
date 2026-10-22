@@ -15,7 +15,7 @@ from urllib.request import Request, build_opener, HTTPCookieProcessor, urlopen
 ROOT = Path(__file__).resolve().parent.parent
 ORIGIN = 'http://127.0.0.1:8766'
 READ = {'/api/state', '/api/models', '/api/list', '/api/item'}
-WRITE = {'/api/model', '/api/favorite', '/api/meta', '/api/preferences', '/api/search/save', '/api/search/activate', '/api/search/delete', '/api/analyze'}
+WRITE = {'/api/model', '/api/favorite', '/api/meta', '/api/preferences', '/api/search/save', '/api/search/activate', '/api/search/delete', '/api/analyze', '/api/chat'}
 LOG = logging.getLogger(__name__)
 
 

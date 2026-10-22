@@ -35,9 +35,9 @@ async function radarCloudApi(path, data) {
 async function cloudRequest(path, data) {
   if (path === '/api/connect' || path === '/api/disconnect') throw Error('Подключение ChatGPT управляется в приложении на твоём компьютере. Уже подключённый аккаунт работает и здесь.');
   const job = await cloudCall('/request', { method: 'POST', body: JSON.stringify({ path, ...(data === undefined ? {} : { data }) }) });
-  const until = Date.now() + (path === '/api/analyze' ? 285000 : 100000);
+  const until = Date.now() + (['/api/analyze','/api/chat'].includes(path) ? 285000 : 100000);
   while (Date.now() < until) {
-    await pause(path==='/api/analyze'?1500:350);
+    await pause(['/api/analyze','/api/chat'].includes(path)?1500:350);
     const result = await cloudCall('/result?id=' + encodeURIComponent(job.id));
     if (result.status === 'done' || result.status === 'failed') {
       const response = result.response || { code: 500, value: {} };

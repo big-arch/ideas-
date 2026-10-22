@@ -210,6 +210,9 @@ class FakeTelegram:
 
 class BotTests(unittest.TestCase):
     def setUp(self):
+        account = patch('garage_radar.bot.chatgpt.status', return_value={'connected': False})
+        account.start()
+        self.addCleanup(account.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.store = Store(Path(self.temp.name) / "test.sqlite3")
         self.api = FakeTelegram()
@@ -217,10 +220,20 @@ class BotTests(unittest.TestCase):
         self.bot = Bot(config, self.store, self.api, {123, 456})
 
     def tearDown(self):
+        self.bot.chat_worker.shutdown(wait=True)
+        self.bot.advisor_worker.shutdown(wait=True)
         self.temp.cleanup()
 
     def update(self, text, chat_id=123, chat_type="private"):
         self.bot.handle({"message": {"chat": {"id": chat_id, "type": chat_type}, "text": text}})
+
+    def test_plain_messages_route_to_background_ai_only_for_allowed_user(self):
+        with patch('garage_radar.bot.conversation_turn', return_value={'answer': 'Проверил запрос.', 'results': []}) as chat:
+            self.update('Lexus IS 200', chat_id=999)
+            self.update('Lexus IS 200')
+            self.bot.chat_worker.shutdown(wait=True)
+            chat.assert_called_once_with(self.store, self.bot.config, 123, 'Lexus IS 200')
+        self.assertEqual(self.api.messages[-1][1], 'Проверил запрос.')
 
     def test_category_menu_and_choice_are_saved_per_user(self):
         self.update("/category")
