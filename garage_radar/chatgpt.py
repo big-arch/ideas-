@@ -214,7 +214,7 @@ def models() -> list[dict]:
             for row in response.get("models", []) if row.get("visibility") == "list" and row.get("slug")]
 
 
-def respond(instructions: str, content: list, *, model: str, web: bool = False, require_web: bool = False) -> dict:
+def respond(instructions: str, content: list, *, model: str, web: bool = False, require_web: bool = False, timeout: int = 180) -> dict:
     if not model: raise ValueError("Выбери модель своего аккаунта в приложении")
     payload = {"model": model, "instructions": instructions, "input": [{"role": "user", "content": content}],
                "store": False, "stream": True}
@@ -226,7 +226,7 @@ def respond(instructions: str, content: list, *, model: str, web: bool = False, 
                       headers={"Content-Type": "application/json", "Authorization": "Bearer " + access_token()})
     output, citations, completed = [], [], False
     try:
-        with urlopen(request, timeout=180) as response:
+        with urlopen(request, timeout=max(10, min(180, timeout))) as response:
             for raw in response:
                 if len(raw) > 2_000_000: raise RemoteError()
                 if not raw.startswith(b"data: "): continue

@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from garage_radar.config import Config, Search
-from garage_radar.conversation import turn, validate_plan, matching
+from garage_radar.conversation import turn, validate_plan, matching, ground_plan
 from garage_radar.location import listing_map
 from garage_radar.models import utc_now
 from garage_radar.storage import Store
@@ -38,21 +38,21 @@ class ConversationTests(unittest.TestCase):
     def test_search_imports_real_results_excludes_old_and_keeps_followup_context(self):
         old = replace(self.car, id='old', url='https://example.org/old', attributes={'site_date_at': (utc_now()-timedelta(days=8)).isoformat()})
         self.store.upsert([old])
-        replies = [{'text': json.dumps(self.plan)}]
+        replies = [{'text': json.dumps(self.plan)}, {'text': 'Нашёл подходящий вариант. Покажу карточку ниже.'}]
         with patch('garage_radar.conversation.chatgpt.status', return_value={'connected': True}), patch('garage_radar.conversation.chatgpt.respond', side_effect=replies) as respond, patch('garage_radar.conversation.SOURCE.fetch', return_value=[self.car]) as fetch:
             result = turn(self.store, self.config, 123, 'Lexus is 200 до миллиона')
             self.assertEqual([r.listing.id for r in result['results']], [self.car.id])
             fetch.assert_called_once_with('car', query='Lexus IS 200')
-            self.assertIn('Новых объявлений: 1', result['answer'])
-            respond.assert_called_once()
-        with patch('garage_radar.conversation.chatgpt.status', return_value={'connected': True}), patch('garage_radar.conversation.chatgpt.respond', side_effect=[{'text': json.dumps(self.plan)}]) as respond, patch('garage_radar.conversation.SOURCE.fetch', return_value=None):
+            self.assertIn('подходящий вариант', result['answer'])
+            self.assertEqual(respond.call_count, 2)
+        with patch('garage_radar.conversation.chatgpt.status', return_value={'connected': True}), patch('garage_radar.conversation.chatgpt.respond', side_effect=[{'text': json.dumps(self.plan)}, {'text': 'Новых вариантов пока нет.'}]) as respond, patch('garage_radar.conversation.SOURCE.fetch', return_value=None):
             result = turn(self.store, self.config, 123, 'ещё')
             self.assertEqual(result['results'], [])
             self.assertIn('Lexus IS 200', respond.call_args_list[0].args[1][0]['text'])
 
     def test_existing_deliveries_are_not_sent_again(self):
         self.store.upsert([self.car]); self.store.mark_delivered(123, self.car)
-        with patch('garage_radar.conversation.chatgpt.status', return_value={'connected': True}), patch('garage_radar.conversation.chatgpt.respond', side_effect=[{'text': json.dumps(self.plan)}]), patch('garage_radar.conversation.SOURCE.fetch', return_value=None):
+        with patch('garage_radar.conversation.chatgpt.status', return_value={'connected': True}), patch('garage_radar.conversation.chatgpt.respond', side_effect=[{'text': json.dumps(self.plan)}, {'text': 'Эти варианты уже показывал.'}]), patch('garage_radar.conversation.SOURCE.fetch', return_value=None):
             self.assertEqual(turn(self.store, self.config, 123, 'Lexus IS200')['results'], [])
 
     def test_analysis_uses_referenced_result(self):
@@ -83,6 +83,27 @@ class ConversationTests(unittest.TestCase):
         items = [listing(identity='item-'+cat, category=cat, attributes={'site_date_at': utc_now().isoformat()}) for cat in categories]
         self.store.upsert(items)
         for index, cat in enumerate(categories):
-            with self.subTest(category=cat), patch('garage_radar.conversation.chatgpt.status', return_value={'connected': True}), patch('garage_radar.conversation.chatgpt.respond', return_value={'text': json.dumps({'intent': 'search', 'category': cat, 'query': ''})}), patch('garage_radar.conversation.SOURCE.fetch', return_value=None):
+            with self.subTest(category=cat), patch('garage_radar.conversation.chatgpt.status', return_value={'connected': True}), patch('garage_radar.conversation.chatgpt.respond', side_effect=[{'text': json.dumps({'intent': 'search', 'category': cat, 'query': ''})}, {'text': 'Показываю варианты.'}]), patch('garage_radar.conversation.SOURCE.fetch', return_value=None):
                 response = turn(self.store, self.config, 1000+index, 'Найди подходящие объявления')
                 self.assertEqual([r.listing.category for r in response['results']], [cat])
+
+    def test_new_commercial_request_cannot_inherit_tobacco_business(self):
+        old = {'category': 'commercial', 'query': 'помещение табачная реализация', 'locality': 'Ростов-на-Дону', 'max_price': 500000}
+        bad = validate_plan({'intent': 'search', **old})
+        clean = ground_plan(bad, 'хочу дешевую коммерцию', old)
+        self.assertEqual(clean['category'], 'commercial')
+        self.assertEqual(clean['query'], '')
+        self.assertEqual(clean['locality'], '')
+        self.assertIsNone(clean['max_price'])
+        fresh_car = ground_plan(validate_plan(self.plan), 'Lexus IS 200', old)
+        self.assertIsNone(fresh_car['max_price'])
+        follow = ground_plan(validate_plan(self.plan), 'ещё', self.plan)
+        self.assertEqual(follow['query'], 'Lexus IS 200')
+
+    def test_legal_discussion_uses_web_and_official_sources_without_searching_ads(self):
+        plan = {'intent': 'chat', 'category': 'garage', 'query': ''}
+        with patch('garage_radar.conversation.chatgpt.status', return_value={'connected': True}), patch('garage_radar.conversation.chatgpt.respond', side_effect=[{'text': json.dumps(plan)}, {'text': 'Нужно учитывать статус собственника.', 'citations': [{'url': 'https://www.nalog.gov.ru/example', 'title': 'ФНС'}]}]) as respond, patch('garage_radar.conversation.SOURCE.fetch') as fetch:
+            result = turn(self.store, self.config, 123, 'Как сдать гараж в аренду и какие налоги?')
+            self.assertIn('ФНС', result['answer'])
+            self.assertTrue(respond.call_args.kwargs['require_web'])
+            fetch.assert_not_called()
