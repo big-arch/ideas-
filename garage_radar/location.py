@@ -9,8 +9,11 @@ def listing_map(item):
     if address and normalized(item.locality) in normalized(address): parts = [item.region]
     if address: parts.append(address)
     query = ', '.join(p for p in parts if p)[:500]
-    return {'query': query, 'url': 'https://yandex.ru/maps/?' + urlencode({'text': query}),
-            'embed': 'https://yandex.ru/map-widget/v1/?' + urlencode({'mode': 'search', 'text': query}),
+    shown_address = address or str(item.locality).strip() or str(item.region).strip()
+    params = {'text': query, 'z': 16}
+    return {'query': query, 'address': shown_address,
+            'url': 'https://yandex.ru/maps/?' + urlencode(params),
+            'embed': 'https://yandex.ru/map-widget/v1/?' + urlencode({'mode': 'search', **params}),
             'precision': 'address_search',
             'note': 'Поиск по адресу продавца. Точная точка объекта не подтверждена.' if address else
                     'В объявлении указан только населённый пункт. Точное расположение неизвестно.'}

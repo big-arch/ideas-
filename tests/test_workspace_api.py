@@ -76,5 +76,6 @@ class WorkspaceApiTests(unittest.TestCase):
             turn.assert_not_called()
         item=self.request('GET','/api/item?id=cheap')[1]['item']
         self.assertEqual(item['map']['precision'],'address_search')
+        self.assertEqual(item['map']['address'],'Ростов-на-Дону')
         self.assertTrue(item['map']['embed'].startswith('https://yandex.ru/map-widget/'))
         self.assertEqual(self.request('GET','/ui-chat.js')[0],200)

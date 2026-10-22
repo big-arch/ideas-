@@ -112,7 +112,10 @@ class ConversationTests(unittest.TestCase):
             with self.assertRaises(ValueError): validate_plan({**self.plan, **change})
         value = listing_map(listing(attributes={'visible_address': 'ул. Тестовая, 1'}))
         self.assertIn('Ростов-на-Дону', value['query'])
+        self.assertEqual(value['address'], 'ул. Тестовая, 1')
         self.assertEqual(value['precision'], 'address_search')
+        self.assertIn('z=16', value['url'])
+        self.assertIn('z=16', value['embed'])
         self.assertIn('Точная точка', value['note'])
 
     def test_cross_process_lease_prevents_context_overwrite(self):
