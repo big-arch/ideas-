@@ -4,7 +4,7 @@ import json
 import secrets
 from urllib.parse import urlsplit
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, build_opener, ProxyHandler
 
 
 class RemoteError(RuntimeError):
@@ -43,10 +43,11 @@ def photo_bytes(url: str) -> tuple[bytes, str]:
     """Only images hosted by the three supported public catalogs."""
     host = urlsplit(url).hostname or ""
     if not url.startswith("https://") or not (host == "img.avito.st" or host.endswith(".img.avito.st")
-            or host == "avatars.mds.yandex.net" or host.endswith(".auto.drom.ru")):
+            or host == "avatars.mds.yandex.net" or host.endswith(".auto.drom.ru") or host == "data.akula.com"):
         raise RemoteError(400)
     try:
-        with urlopen(url, timeout=20) as response:
+        opener = build_opener(ProxyHandler({})).open if host == "data.akula.com" else urlopen
+        with opener(url, timeout=20) as response:
             final_host = urlsplit(response.url).hostname
             if final_host != host:
                 raise RemoteError(400)

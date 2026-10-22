@@ -6,7 +6,7 @@ import time
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
-from urllib.request import urlopen
+from urllib.request import urlopen, build_opener, ProxyHandler
 
 from .avito import SourceUnavailable, VOID, number
 from .models import Listing, normalized, utc_now
@@ -14,12 +14,13 @@ from .dates import site_date
 
 YANDEX_PATHS = {"garage": "garazh", "apartment": "kvartira/vtorichniy-rynok", "house": "dom",
                 "land": "uchastok", "commercial": "kommercheskaya-nedvizhimost"}
-PUBLIC_SOURCES = {"avito_public_html", "yandex_public_html", "drom_public_html"}
+AKULA_PATHS = {"garage": "garage", "apartment": "kvartira", "house": "dom"}
+PUBLIC_SOURCES = {"avito_public_html", "yandex_public_html", "drom_public_html", "akula_public_html"}
 
 
 def source_name(item: Listing) -> str:
     host = urlsplit(item.url).hostname or ""
-    for domain, name in (("avito.ru", "Авито"), ("realty.yandex.ru", "Яндекс Недвижимость"), ("drom.ru", "Дром")):
+    for domain, name in (("avito.ru", "Авито"), ("realty.yandex.ru", "Яндекс Недвижимость"), ("drom.ru", "Дром"), ("akula.com", "Акула")):
         if host == domain or host.endswith("." + domain):
             return name
     return "Источник"
@@ -37,7 +38,8 @@ class VisibleCards(HTMLParser):
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
         classes = a.get("class", "").split()
-        root = (a.get("data-test") == "OffersSerpItem" if self.source == "yandex"
+        root = ("offer-snippet" in classes if self.source == "akula" else
+                a.get("data-test") == "OffersSerpItem" if self.source == "yandex"
                 else a.get("data-ftid") == "bulls-list_bull")
         if root and self.current is None:
             self.current = {"title": [], "price": [], "address": [], "description": [], "date": [], "url": "", "photo": ""}
@@ -45,6 +47,8 @@ class VisibleCards(HTMLParser):
         marker = ""
         if self.current is not None:
             href = a.get("href", "")
+            if self.source == "akula":
+                if tag == "a" and re.fullmatch(r"/prodaja/(?:garage|kvartira|dom)/(?:[^/]+/)?[^/]+-r\d+\.html", href): self.current["url"] = href
             if tag == "a" and ((self.source == "yandex" and re.fullmatch(r"/offer/\d+/", href))
                                or (self.source == "drom" and a.get("data-ftid") == "bull_title")):
                 self.current["url"] = href
@@ -54,15 +58,19 @@ class VisibleCards(HTMLParser):
                 if any(c.startswith("AddressWithGeoLinks__addressContainer") for c in classes): marker = "address"
                 if "OffersSerpItem__description" in classes: marker = "description"
                 if any(c.startswith("OffersSerpItem__publish-date") for c in classes): marker = "date"
+            elif self.source == "akula":
+                if tag == "strong": marker = "title"
+                marker = {"offer-snippet__price": "price", "offer-snippet__address": "address",
+                          "offer-snippet__description": "description", "offer-snippet-tags__item": "date"}.get(a.get("class", ""), marker)
             else:
                 marker = {"bull_title": "title", "bull_price": "price", "bull_location": "address",
                           "component_inline-bull-description": "description", "bull_date": "date"}.get(a.get("data-ftid"), "")
             if tag == "img" and not self.current["photo"]:
                 candidates = a.get("srcset", "").split(",")
-                photo = candidates[-1].strip().split()[0] if candidates[-1].strip() else a.get("src", "")
+                photo = candidates[-1].strip().split()[0] if candidates[-1].strip() else a.get("data-src", a.get("src", ""))
                 photo = urljoin("https://realty.yandex.ru", photo)
                 host = urlsplit(photo).hostname or ""
-                if photo.startswith("https://") and (host == "avatars.mds.yandex.net" or host.endswith(".auto.drom.ru")):
+                if photo.startswith("https://") and (host == "avatars.mds.yandex.net" or host.endswith(".auto.drom.ru") or host == "data.akula.com"):
                     self.current["photo"] = photo
         if tag not in VOID:
             self.stack.append((tag, marker))
@@ -96,7 +104,7 @@ def parse_public(document: str, category: str, source: str) -> list[Listing]:
         if not title or not total or re.search(r"в месяц|за м|/м", price):
             continue
         price_rub = float(re.sub(r"\s", "", total[1]))
-        url = urljoin("https://realty.yandex.ru", card["url"])
+        url = urljoin("https://rostov.akula.com" if source == "akula" else "https://realty.yandex.ru", card["url"])
         path = urlsplit(url)
         if source == "yandex":
             ident = re.fullmatch(r"/offer/(\d+)/", path.path)
@@ -110,6 +118,12 @@ def parse_public(document: str, category: str, source: str) -> list[Listing]:
                 locality = first
             elif re.search(r"\b(?:пос[её]лок|село|хутор|станица|деревня)\b", first, re.I):
                 locality = first
+        elif source == "akula":
+            ident = re.fullmatch(r"/prodaja/" + AKULA_PATHS.get(category, "unsupported") + r"/(?:[^/]+/)?[^/]+-r(\d+)\.html", path.path)
+            if category not in AKULA_PATHS or path.hostname != "rostov.akula.com" or not ident: continue
+            if "ростов-на-дону" not in normalized(address): continue
+            ident = ident[1]
+            locality = "Ростов-на-Дону"
         else:
             # Reject advertised cards from other regions and the city Rostov (Yaroslavl).
             ident = re.fullmatch(r"/rostov-na-donu/[^/]+/[^/]+/(\d+)\.html", path.path)
@@ -126,7 +140,10 @@ def parse_public(document: str, category: str, source: str) -> list[Listing]:
         if category != "car" and not area: continue
         group = "улица: " + address.split(",")[0] if address else ""
         attributes = {"source": source + "_public_html", "source_scope": "partial_catalog", "visible_address": address}
-        date_text = " ".join("".join(card["date"]).split())
+        date_text = " ".join(" ".join(card["date"]).split())
+        if source == "akula":
+            match = re.search(r"\b\d{1,2}\s+[а-я]+\s+20\d{2}\b", date_text)
+            date_text = match[0] if match else ""
         attributes.update(site_date_label=date_text, site_date_at=site_date(date_text, utc_now()))
         garage_type = ("parking" if "машиномест" in text or "паркинг" in text else "metal" if "металлическ" in text
                        else "capital" if any(w in text for w in ("кирпич", "капитальн", "железобетон")) else "unknown")
@@ -162,15 +179,21 @@ class PublicCatalog:
         self.due = {}
 
     def fetch(self, category: str) -> list[Listing] | None:
-        if self.name == "drom" and category != "car" or self.name == "yandex" and category not in YANDEX_PATHS:
+        if (self.name == "drom" and category != "car" or self.name == "yandex" and category not in YANDEX_PATHS
+                or self.name == "akula" and category not in AKULA_PATHS):
             return None
         now = time.monotonic()
         if now < self.due.get(category, 0): return None
         self.due[category] = now + self.refresh_seconds
-        url = ("https://rostov-na-donu.drom.ru/auto/all/" if self.name == "drom" else
+        url = ("https://rostov.akula.com/prodaja/" + AKULA_PATHS[category] + "/" if self.name == "akula" else
+               "https://rostov-na-donu.drom.ru/auto/all/" if self.name == "drom" else
                "https://realty.yandex.ru/rostov-na-donu/kupit/" + YANDEX_PATHS[category] + "/")
         try:
-            with urlopen(url, timeout=25) as response:
+            # The Akula catalog is public; direct TLS avoids an incompatible local proxy certificate.
+            opener = build_opener(ProxyHandler({})).open if self.name == "akula" else urlopen
+            with opener(url, timeout=25) as response:
+                if urlsplit(response.url).hostname != urlsplit(url).hostname:
+                    raise SourceUnavailable("Каталог перенаправил на другой источник")
                 body = response.read(10_000_001)
                 if len(body) > 10_000_000: raise SourceUnavailable("Каталог превышает ограничение размера")
                 document = body.decode(response.headers.get_content_charset() or "utf-8")

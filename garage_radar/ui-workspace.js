@@ -16,6 +16,7 @@ function initFilterPanel(){
   const panel=el('filterPanel');
   try{panel.open=localStorage.getItem('radar.filters.open')==='1'}catch{}
   const update=()=>{const parts=[el('sort').selectedOptions[0]?.textContent||'Сначала дешевле'];if(el('viewFilter').value!=='all')parts.push(el('viewFilter').selectedOptions[0]?.textContent);if(el('savedSearch').value)parts.push(el('savedSearch').selectedOptions[0]?.textContent);el('filterSummary').textContent=parts.filter(Boolean).join(' · ')};
+  el('ratedOnly').onchange=()=>{visibleCount=10;renderRows()};
   panel.addEventListener('toggle',()=>{try{localStorage.setItem('radar.filters.open',panel.open?'1':'0')}catch{}});
   for(const id of ['sort','viewFilter','savedSearch'])el(id).addEventListener('change',update);
   new MutationObserver(update).observe(el('savedSearch'),{childList:true});

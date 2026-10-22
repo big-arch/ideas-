@@ -5,7 +5,7 @@ from datetime import timedelta
 
 from .analysis import Assessment, assess, in_scope, money
 from .config import Search
-from .models import Listing, duplicate_key, timestamp, utc_now
+from .models import Listing, duplicate_key, timestamp, utc_now, normalized
 from .dates import MSK
 
 
@@ -38,6 +38,8 @@ def caption(result: Assessment) -> str:
         lines.append(f"Похожие предложения: около {money(result.reference_price)} · {len(result.comparable_ids)} аналогов")
         lines.append("<i>Предварительно, по городу, без поправки на район</i>" if result.comparison_scope == "city"
                      else "<i>Предварительно, по ценам объявлений</i>")
+    if normalized(item.locality) != "ростов-на-дону":
+        lines.insert(0, "🔶 <b>" + escape(item.locality) + " · за пределами Ростова-на-Дону</b>")
     if result.urgency_claim:
         lines.append("Срочная продажа, по словам продавца")
     if item.attributes.get("site_date_at"):

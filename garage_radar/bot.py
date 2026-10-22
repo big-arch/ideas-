@@ -24,7 +24,7 @@ from .demo import demo_listings
 from .models import CATEGORIES, utc_now, timestamp
 from .presentation import caption, ranked_feed, recent, full_card
 from .network import RemoteError, post_json, photo_bytes, post_photos
-from .sources import PublicCatalog, source_name
+from .sources import PublicCatalog, source_name, AKULA_PATHS
 from .schedule import SCHEDULE_LABELS, due_slot, MOSCOW
 from .storage import Store, load_jsonl
 from .workspace import STAGES, VIEWS, active_profile, filter_results, matches_profile, validate_profile, watched
@@ -182,13 +182,22 @@ class Bot:
         self.advisor_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="listing-advisor")
         self.advisor_pending = set()
         self.advisor_lock = threading.Lock()
+        self.delivery_lock = threading.Lock()
         self.source = PublicAvito(config.source_refresh_seconds) if config.source in {"avito_public", "public_catalogs"} else None
         self.sources = [("Авито", self.source)] if self.source else []
         if config.source == "public_catalogs":
             self.sources += [("Яндекс Недвижимость", PublicCatalog("yandex", config.source_refresh_seconds)),
-                             ("Дром", PublicCatalog("drom", config.source_refresh_seconds))]
+                             ("Дром", PublicCatalog("drom", config.source_refresh_seconds)),
+                             ("Акула", PublicCatalog("akula", config.source_refresh_seconds))]
 
     def publish(self, chat_id, result, keyboard):
+        # Scheduled scans and Telegram commands can select the same object concurrently.
+        with self.delivery_lock:
+            if result.listing.id in self.store.delivered_ids(chat_id, [result.listing]):
+                return None
+            return self._publish(chat_id, result, keyboard)
+
+    def _publish(self, chat_id, result, keyboard):
         def remember(message):
             self.store.mark_delivered(chat_id,result.listing)
             if isinstance(message,dict) and message.get('message_id'):
@@ -701,12 +710,19 @@ class Bot:
                                "Аналоги: один населённый пункт и район, тип, права, состояние, близкая площадь.")
         elif command == "/status":
             count = sum(item.category == search.category for item in self.store.all())
-            feed = self.store.get_state("feed_status", "Автоматический импорт не выполнялся")
             source = ", ".join(name for name, _ in self.sources) if self.sources else "Импорт файла"
-            states = "\n".join(self.store.get_state("source_status:" + name) for name, _ in self.sources)
-            self.telegram.send(chat_id, f"Объявлений в базе: {count}\n{feed}\nИсточник: {source}\n"
-                               f"{states}\nПоследняя сводка: {self.store.get_state(f'digest_last:{chat_id}', 'ещё не отправлялась')}\n"
-                               f"ИИ: {'Ollama, доступность проверяется при запросе' if self.model else 'не подключён'}")
+            states = []
+            for name, adapter in self.sources:
+                if name == "Акула" and search.category not in AKULA_PATHS or name == "Дром" and search.category != "car" or name == "Яндекс Недвижимость" and search.category == "car":
+                    continue
+                states.append(self.store.get_state(f"source_status:{name}:{search.category}", name + ": ожидается проверка этой категории"))
+            last = self.store.get_state(f'digest_last:{chat_id}', 'ещё не отправлялась')
+            try: last = timestamp(last).astimezone(MOSCOW).strftime('%d.%m.%Y %H:%M МСК')
+            except (ValueError, TypeError): pass
+            account = chatgpt.status()
+            ai = "ChatGPT подключён; фото, текст и поиск по району" if account.get('connected') else ("Ollama · резервный текстовый разбор" if self.model else "не подключён")
+            self.telegram.send(chat_id, f"{CATEGORIES[search.category]} · объявлений в базе: {count}\nИсточники: {source}\n"
+                               + "\n".join(states) + f"\nОхват: первые страницы каталогов; свежая подборка — до 7 дней по дате сайта.\nПоследняя сводка: {last}\nИИ: {ai}")
         elif command == "/digest":
             self.show_feed(chat_id)
         elif command == "/discount":
@@ -784,9 +800,15 @@ class Bot:
                         if items is not None:
                             self.store.upsert(items)
                             self.store.set_state("source_status:" + name, f"{name} · {CATEGORIES[category]}: {len(items)} объявлений, " + utc_now().isoformat(timespec="minutes"))
+                            fresh = sum(recent(item, utc_now(), 7) for item in items)
+                            self.store.set_state(f"source_status:{name}:{category}",
+                                f"{name}: прочитано {len(items)}, за неделю {fresh} · " + utc_now().astimezone(MOSCOW).strftime('%d.%m %H:%M МСК'))
+                            self.store.set_state(f"source_success:{name}:{category}", "последний успех " + utc_now().astimezone(MOSCOW).strftime('%d.%m %H:%M МСК'))
                             LOG.info("Public catalog imported, source %s, category %s, records %s", name, category, len(items))
                     except SourceUnavailable:
                         self.store.set_state("source_status:" + name, name + ": временно недоступен, сохранённые данные доступны")
+                        previous = self.store.get_state(f"source_success:{name}:{category}")
+                        self.store.set_state(f"source_status:{name}:{category}", name + ": временно недоступен; сохранённые данные доступны" + (" · " + previous if previous else ""))
                         LOG.warning("Public catalog unavailable, source %s, category %s", name, category)
         if self.config.feed_file:
             try:
@@ -809,7 +831,7 @@ class Bot:
                 if result.listing.id in self.store.delivered_ids(chat_id,[result.listing]):
                     continue
                 try:
-                    self.telegram.send_card(chat_id, result, card_keyboard(result.listing))
+                    self.publish(chat_id, result, card_keyboard(result.listing))
                 except RemoteError as error:
                     if error.status == 403:
                         self.store.subscribe(chat_id, False)
@@ -827,29 +849,34 @@ class Bot:
         offset = int(self.store.get_state("telegram_offset", "0"))
         next_scan = 0.0
         LOG.info("Bot started; source mode %s", self.config.source)
-        while True:
-            try:
-                if time.monotonic() >= next_scan:
-                    next_scan = time.monotonic() + self.config.poll_seconds
-                    self.scan()
-                updates = self.telegram.call("getUpdates", {"offset": offset, "timeout": 25,
-                                                            "allowed_updates": ["message", "callback_query"]})
-                if not isinstance(updates, list):
-                    raise RemoteError()
-                for update in updates:
-                    try:
-                        self.handle(update)
-                    except RemoteError as error:
-                        if error.status not in {400, 403}:
-                            raise
-                        LOG.warning("Telegram message could not be delivered, code %s", error.status)
-                    offset = update["update_id"] + 1
-                    self.store.set_state("telegram_offset", str(offset))
-            except RemoteError as error:
-                if error.status in {401, 409}:
-                    raise ValueError("Проверьте токен, отсутствие webhook и другого экземпляра бота") from None
-                LOG.warning("Network unavailable, code %s", error.status)
-                time.sleep(error.retry_after)
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="source-scan") as scanner:
+            pending_scan = None
+            while True:
+                try:
+                    if pending_scan is not None and pending_scan.done():
+                        completed, pending_scan = pending_scan, None
+                        completed.result()
+                    if pending_scan is None and time.monotonic() >= next_scan:
+                        next_scan = time.monotonic() + self.config.poll_seconds
+                        pending_scan = scanner.submit(self.scan)
+                    updates = self.telegram.call("getUpdates", {"offset": offset, "timeout": 25,
+                                                                "allowed_updates": ["message", "callback_query"]})
+                    if not isinstance(updates, list):
+                        raise RemoteError()
+                    for update in updates:
+                        try:
+                            self.handle(update)
+                        except RemoteError as error:
+                            if error.status not in {400, 403}:
+                                raise
+                            LOG.warning("Telegram message could not be delivered, code %s", error.status)
+                        offset = update["update_id"] + 1
+                        self.store.set_state("telegram_offset", str(offset))
+                except RemoteError as error:
+                    if error.status in {401, 409}:
+                        raise ValueError("Проверьте токен, отсутствие webhook и другого экземпляра бота") from None
+                    LOG.warning("Network unavailable, code %s", error.status)
+                    time.sleep(error.retry_after)
 
 
 def run_bot(config: Config, store: Store) -> None:

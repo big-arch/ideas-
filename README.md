@@ -153,3 +153,12 @@ API Telegram реализован по [официальной документ�
 В приложении фильтры и сохранение поисков находятся под списком режимов. Можно сохранить категорию, бюджет, город или район, обязательные слова и исключения (по доступному тексту). Сохранённые поиски редактируются, копируются и удаляются. В боте: /searches, /views, /save_search Название | Город или район | Максимальная цена | Исключить слова. Категория команды берётся из текущего выбора. Выбор новой категории отключает активный сохранённый фильтр, не удаляя его.
 
 Снижение цены определяется по наблюдениям того же объявления, не по рекламному тексту. Избранное или статус Интересен/Связался/Осмотр включает слежение автоматически, его можно выключить вручную. Поиски с включённым уведомлением следят за соответствующими предложениями, даже если другой поиск выбран в ленте. Уведомления отправляются только подписанному пользователю (/start), для свежих активных объектов, по изменениям за последние сутки, до пяти за цикл, с подтверждением доставки в базе. /stop выключает их. Без работающего компьютера мониторинга нет. Отсутствующие исходные наблюдения не восстанавливаются задним числом.
+
+
+### Public catalog expansion and region markers
+
+Akula public catalogs now cover Rostov-on-Don garages/parking spaces, apartments and houses. Original catalog dates remain mandatory for the seven-day feed. Old or undated records never pad a digest. Catalog reads are throttled and use direct verified HTTPS for this provider. Its photo server currently has an expired certificate: photo download fails safely and no substitute image is generated. Full descriptions can still be read from public listing pages.
+
+Source scans run in a single background worker, leaving Telegram callbacks responsive. The status command shows the selected category, per-source fresh counts and Moscow time, and reports ChatGPT separately from the Ollama fallback. Delivery selection and sending are locked to avoid a manual/scheduled race.
+
+Cities outside Rostov-on-Don use an orange location badge with a slow pulsing dot in the Mini App (disabled by reduced-motion preferences). Telegram posts use a static warning. Price comparison badges display signed percentages and comparable counts; insufficient or dispersed samples show an explicit absence of an estimate. These are asking-price comparisons, not verified transaction prices.

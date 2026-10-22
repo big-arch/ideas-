@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from html.parser import HTMLParser
 from urllib.parse import urlsplit, urljoin
-from urllib.request import urlopen
+from urllib.request import urlopen, build_opener, ProxyHandler
 from urllib.error import HTTPError, URLError
 
 from .avito import VOID, SourceUnavailable
@@ -22,7 +22,7 @@ class DetailParser(HTMLParser):
         a = dict(attrs)
         marker, classes = a.get("data-marker", ""), a.get("class", "")
         key = ""
-        if marker in {"item-view/item-description", "item-description"} or "OfferCardTextDescription__text" in classes:
+        if marker in {"item-view/item-description", "item-description"} or "OfferCardTextDescription__text" in classes or "object__text" in classes.split():
             key = "description"
         if marker == "item-view/item-params" or "OfferCardFeatures__" in classes or a.get("data-ftid") == "bull_description":
             key = "params"
@@ -71,7 +71,7 @@ def parse_detail(document: str, item: Listing) -> dict:
         parsed = urlsplit(photo)
         host = parsed.hostname or ""
         if parsed.scheme != "https" or not (host == "img.avito.st" or host.endswith(".img.avito.st")
-                or host == "avatars.mds.yandex.net" or host.endswith(".auto.drom.ru")): continue
+                or host == "avatars.mds.yandex.net" or host.endswith(".auto.drom.ru") or host == "data.akula.com"): continue
         # Yandex includes several sizes of the same image in schema.org.
         identity = (host, parsed.path.rsplit("/", 1)[0]) if host == "avatars.mds.yandex.net" else photo
         if identity not in seen:
@@ -92,10 +92,11 @@ def read_detail(item: Listing, store, *, refresh: bool = False) -> dict:
             if (utc_now() - timestamp(data["fetched_at"])).total_seconds() < 21600: return data
         except (ValueError, KeyError): pass
     host = urlsplit(item.url).hostname
-    if host not in {"avito.ru", "www.avito.ru", "realty.yandex.ru", "auto.drom.ru"}:
+    if host not in {"avito.ru", "www.avito.ru", "realty.yandex.ru", "auto.drom.ru", "rostov.akula.com"}:
         raise SourceUnavailable("Источник полной страницы не поддерживается")
     try:
-        with urlopen(item.url, timeout=25) as response:
+        opener = build_opener(ProxyHandler({})).open if host == "rostov.akula.com" else urlopen
+        with opener(item.url, timeout=25) as response:
             if urlsplit(response.url).hostname not in {host, "www.avito.ru", "avito.ru"}:
                 raise SourceUnavailable("Источник перенаправил на другую страницу")
             body = response.read(8_000_001)

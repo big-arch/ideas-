@@ -11,6 +11,13 @@ from test_radar import listing, peers
 
 
 class PresentationTests(unittest.TestCase):
+    def test_city_outside_rostov_has_visible_warning_in_telegram(self):
+        target = listing()
+        target = replace(target, locality="Волгодонск")
+        text = caption(assess(target, [target], Search()))
+        self.assertIn("🔶 <b>Волгодонск · за пределами Ростова-на-Дону</b>", text)
+        self.assertNotIn("за пределами", caption(assess(listing(), peers(), Search())))
+
     def test_exact_percentage_is_calculated_not_rounded_to_a_tier(self):
         for price, expected in ((900000, "10%"), (800000, "20%"), (730000, "27%")):
             result = assess(listing(price=price), peers(), Search())
