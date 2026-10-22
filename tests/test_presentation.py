@@ -7,10 +7,17 @@ from garage_radar.bot import Telegram
 from garage_radar.config import Search
 from garage_radar.presentation import caption, ranked_feed
 from garage_radar.network import RemoteError
+from garage_radar.models import utc_now
 from test_radar import listing, peers
 
 
 class PresentationTests(unittest.TestCase):
+    def test_placeholder_commercial_price_not_ranked_as_a_bargain(self):
+        placeholder=listing(category='commercial',price=10,attributes={'source':'avito_public_html','site_date_at':utc_now().isoformat()})
+        self.assertEqual(ranked_feed([placeholder],Search(category='commercial'),recent_days=7),[])
+        result=assess(placeholder,[placeholder],Search(category='commercial'))
+        self.assertEqual(result.status,'excluded')
+        self.assertIn('не подтверждена',result.reason)
     def test_city_outside_rostov_has_visible_warning_in_telegram(self):
         target = listing()
         target = replace(target, locality="Волгодонск")

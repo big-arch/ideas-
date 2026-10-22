@@ -267,6 +267,7 @@ class PublicAvito:
     def __init__(self, refresh_seconds: int = 900, max_pages: int = 3):
         self.refresh_seconds = max(300, refresh_seconds)
         self.due: dict[str, float] = {}
+        self.failures: dict[str, str] = {}
         self.max_pages = min(3, max(1, max_pages))
 
     def fetch(self, category: str, *, query: str = "") -> list[Listing] | None:
@@ -275,7 +276,9 @@ class PublicAvito:
         key = category + ":" + query.casefold().strip()
         now = time.monotonic()
         if now < self.due.get(key, 0):
+            if key in self.failures: raise SourceUnavailable(self.failures[key])
             return None
+        self.failures.pop(key, None)
         self.due[key] = now + self.refresh_seconds
         url = "https://www.avito.ru/rostovskaya_oblast/" + PATHS[category]
         if query.strip(): url += "?" + urlencode({"q": query.strip()})
@@ -302,9 +305,13 @@ class PublicAvito:
             return list(items.values())
         except HTTPError as error:
             self.due[key] = now + 3600
-            raise SourceUnavailable(f"Авито недоступен, HTTP {error.code}. Повтор отложен, обход защиты не используется") from None
+            self.failures[key] = f"Авито недоступен, HTTP {error.code}. Повтор отложен, обход защиты не используется"
+            raise SourceUnavailable(self.failures[key]) from None
         except (URLError, TimeoutError, OSError, UnicodeError):
-            raise SourceUnavailable("Не удалось прочитать публичную страницу Авито") from None
-        except SourceUnavailable:
             self.due[key] = now + 3600
+            self.failures[key] = "Не удалось прочитать публичную страницу Авито"
+            raise SourceUnavailable(self.failures[key]) from None
+        except SourceUnavailable as error:
+            self.due[key] = now + 3600
+            self.failures[key] = str(error)
             raise

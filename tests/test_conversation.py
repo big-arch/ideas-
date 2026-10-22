@@ -16,6 +16,51 @@ from test_radar import listing
 
 
 class ConversationTests(unittest.TestCase):
+    def test_tobacco_premises_is_a_use_case_not_a_literal_keyword(self):
+        raw = validate_plan({'intent': 'search', 'category': 'commercial', 'query': 'табачная продукция'})
+        plan = ground_plan(raw, 'я хочу помещение под табачную продукцию', {})
+        self.assertEqual(plan['query'], '')
+        self.assertEqual(plan['intent'], 'clarify')
+        self.assertEqual(plan['purpose'], 'tobacco_retail')
+
+    def test_use_case_clarifies_then_searches_purchase_without_tobacco_words(self):
+        premises = listing(category='commercial', title='Торговое помещение, 30 м²', attributes={'site_date_at': utc_now().isoformat()})
+        self.store.upsert([premises])
+        with patch('garage_radar.conversation.chatgpt.status', return_value={'connected': True}), patch('garage_radar.conversation.chatgpt.respond', return_value={'text': json.dumps({'intent': 'search', 'category': 'commercial', 'query': 'табачная продукция'})}), patch('garage_radar.conversation.SOURCE.fetch') as fetch:
+            reply = turn(self.store, self.config, 123, 'я хочу помещение под табачную продукцию')
+            self.assertIn('аренда или покупка', reply['answer'])
+            fetch.assert_not_called()
+        plan = {'intent': 'chat', 'category': 'commercial', 'query': '', 'max_price': 1000000}
+        with patch('garage_radar.conversation.chatgpt.status', return_value={'connected': True}), patch('garage_radar.conversation.chatgpt.respond', side_effect=[{'text': json.dumps(plan)}, {'text': 'Вот предварительный кандидат. Нужна проверка назначения и окружения.'}]), patch('garage_radar.conversation.SOURCE.fetch', return_value=None) as fetch:
+            reply = turn(self.store, self.config, 123, 'покупка до миллиона')
+            fetch.assert_called_once_with('commercial', query='')
+            self.assertEqual([r.listing.id for r in reply['results']], [premises.id])
+            self.assertNotIn('pending_search', json.loads(self.store.get_state('conversation:123')))
+
+    def test_rental_not_silently_replaced_with_sale(self):
+        prior = {'intent': 'clarify', 'category': 'commercial', 'purpose': 'tobacco_retail', 'deal': 'unspecified', 'query': ''}
+        plan = ground_plan(validate_plan({'intent': 'search', 'category': 'commercial', 'query': ''}), 'аренда', prior)
+        self.assertEqual(plan['deal'], 'rent')
+        self.assertEqual(plan['intent'], 'clarify')
+
+    def test_shop_use_case_excludes_explicit_office_warehouse_and_business_sale(self):
+        plan=validate_plan({'intent':'search','category':'commercial','query':'','purpose':'tobacco_retail'})
+        for title,kind in [('Офис, 50 м²','office'),('Склад, 100 м²','warehouse'),('Готовый бизнес, табачный магазин','retail')]:
+            item=listing(category='commercial',title=title,attributes={'property_type':kind})
+            self.assertFalse(matching(item,plan),title)
+        self.assertTrue(matching(listing(category='commercial',title='Помещение свободного назначения',attributes={'property_type':'free'}),plan))
+
+    def test_one_source_failure_still_returns_other_platform_candidates(self):
+        from garage_radar.avito import SourceUnavailable
+        item = listing(category='commercial', title='Торговое помещение', url='https://realty.yandex.ru/offer/123/', attributes={'source': 'yandex_public_html', 'site_date_at': utc_now().isoformat()})
+        self.store.upsert([item])
+        plan = {'intent': 'search', 'category': 'commercial', 'query': ''}
+        with patch('garage_radar.conversation.chatgpt.status', return_value={'connected': True}), patch('garage_radar.conversation.chatgpt.respond', side_effect=[{'text': json.dumps(plan)}, {'text': 'Есть вариант из другого источника.'}]), patch('garage_radar.conversation.SOURCE.fetch', side_effect=SourceUnavailable('Авито недоступен, HTTP 429')):
+            reply = turn(self.store, self.config, 123, 'хочу дешевую коммерцию')
+            self.assertEqual([r.listing.id for r in reply['results']], [item.id])
+            self.assertIn('429', reply['source_note'])
+            self.assertIn('429', self.store.get_state('chat_source_error:123'))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Store(Path(self.tmp.name) / 'radar.sqlite3')

@@ -17,4 +17,4 @@ where = ["."]
 include = ["garage_radar*"]
 
 [tool.setuptools.package-data]
-garage_radar = ["ui.html", "ui.css", "ui.js", "ui-workspace.js"]
+garage_radar = ["ui.html", "ui.css", "ui.js", "ui-workspace.js", "ui-chat.js"]

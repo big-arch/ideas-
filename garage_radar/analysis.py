@@ -121,9 +121,14 @@ def risks(item: Listing) -> tuple[str, ...]:
     return tuple(dict.fromkeys(found))
 
 
+def unconfirmed_token_price(item: Listing) -> bool:
+    return (item.category == 'commercial' and item.attributes.get('source') in PUBLIC_SOURCES
+            and item.transaction == 'sale' and item.price_basis == 'total' and item.price_rub <= 1000)
+
+
 def in_scope(item: Listing, search: Search, now: datetime) -> bool:
     age = now - timestamp(item.observed_at)
-    return (item.active and item.category == search.category and item.transaction == "sale" and item.price_basis == "total"
+    return (not unconfirmed_token_price(item) and item.active and item.category == search.category and item.transaction == "sale" and item.price_basis == "total"
             and normalized(item.region) == normalized(search.region)
             and (not search.locality or normalized(item.locality) == normalized(search.locality))
             and timedelta(0) <= age <= timedelta(days=search.max_age_days))
@@ -148,6 +153,8 @@ def assess(item: Listing, pool: list[Listing], search: Search, now: datetime | N
     flags = risks(item)
     urgent = bool(re.search(r"\bсрочн|\bпереезд|быстр\w*\s+продаж", normalized(item.title + " " + item.description)))
     common = {"listing": item, "risk_flags": flags, "urgency_claim": urgent}
+    if unconfirmed_token_price(item):
+        return Assessment(**common, status="excluded", reason="Условная цена до 1000 ₽ за коммерческий объект: полная цена продажи не подтверждена")
     if not in_scope(item, search, now):
         return Assessment(**common, status="excluded", reason="Не соответствует региону, сроку актуальности или типу сделки")
     if not complete(item):

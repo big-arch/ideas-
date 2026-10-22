@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
 from dataclasses import replace
 
 from garage_radar.analysis import assess
-from garage_radar.avito import SourceUnavailable, parse_catalog
+from garage_radar.avito import SourceUnavailable, parse_catalog, PublicAvito
 from garage_radar.config import Search
 
 
@@ -21,6 +23,12 @@ def card(identity="123", title="Гараж, 24 м²", params="кирпичный
 
 
 class AvitoTests(unittest.TestCase):
+    def test_backoff_retains_failure_reason_without_retrying_source(self):
+        source=PublicAvito()
+        with patch('garage_radar.avito.urlopen',side_effect=HTTPError('https://www.avito.ru/',429,'limited',{},None)) as request:
+            for _ in range(2):
+                with self.assertRaisesRegex(SourceUnavailable,'HTTP 429'): source.fetch('commercial')
+            request.assert_called_once()
     def test_lazy_photo_is_read_from_public_slider_marker(self):
         document = card().replace('<img alt="untrusted image">', '<li data-marker="slider-image/image-https://20.img.avito.st/image/photo-real.jpg"><img src="data:image/gif;base64,abc"></li>')
         self.assertEqual(parse_catalog(document, "garage")[0].photo_url, "https://20.img.avito.st/image/photo-real.jpg")

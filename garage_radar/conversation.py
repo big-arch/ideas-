@@ -29,7 +29,7 @@ CURRENT_FACTS = re.compile(r'закон|налог|юрид|договор|ро�
 
 def followup(text):
     value = normalized(text)
-    return bool(re.match(r'^(?:еще|ещё|дальше|следующ|дешевле|подешевле|только\b|до\s|от\s|а\s|увелич|уменьш|повыше|пониже)', value))
+    return bool(re.match(r'^(?:еще|ещё|дальше|следующ|дешевле|подешевле|только\b|до\s|от\s|а\s|увелич|уменьш|повыше|пониже|покупка\b|купить\b|аренда\b|снять\b)', value))
 
 
 def supported_word(word, source):
@@ -56,6 +56,17 @@ def ground_plan(plan, text, previous):
     if continuing and not result['locality']: result['locality'] = previous.get('locality', '')
     if not continuing and not re.search(r'тысяч|миллион|млн|миллиард|руб|₽|\b\d{5,}\b|\b(?:до|от|бюджет)\s*\d', normalized(text)):
         result['min_price'] = result['max_price'] = None
+    purpose = bool(re.search(r'табач|табак|сигарет|вейп', normalized(text))) and bool(re.search(r'помещен|магазин|точк|коммерц|продукц', normalized(text)))
+    if purpose or continuing and previous.get('purpose') == 'tobacco_retail':
+        result['purpose'] = 'tobacco_retail'
+        result['category'] = 'commercial'
+        result['query'] = ''  # Intended use is not a phrase required in the seller text.
+        result['deal'] = previous.get('deal', 'unspecified') if continuing else 'unspecified'
+        if re.search(r'купить|покупк|приобрест|собственност', normalized(text)): result['deal'] = 'sale'
+        elif re.search(r'аренд|снять|сниму', normalized(text)): result['deal'] = 'rent'
+        if continuing and previous.get('intent') == 'clarify' and result['deal'] in {'sale', 'rent'}:
+            result['intent'] = 'search' if result['deal'] == 'sale' else 'clarify'
+        if result['intent'] == 'search' and result['deal'] != 'sale': result['intent'] = 'clarify'
     return validate_plan(result)
 
 
@@ -70,8 +81,11 @@ def validate_plan(raw):
     category = raw.get('category', 'garage')
     if category not in CATEGORIES: raise ValueError('Неизвестная категория поиска')
     intent = raw.get('intent', 'search')
-    if intent not in {'search', 'chat', 'analysis'}: raise ValueError('Неизвестное действие')
+    if intent not in {'search', 'chat', 'analysis', 'clarify'}: raise ValueError('Неизвестное действие')
     result = {'intent': intent, 'category': category}
+    result['purpose'] = raw.get('purpose', '') if raw.get('purpose', '') in {'', 'tobacco_retail'} else ''
+    result['deal'] = raw.get('deal', 'sale')
+    if result['deal'] not in {'sale', 'rent', 'unspecified'}: raise ValueError('Неизвестный тип сделки')
     for key, limit in [('query', 160), ('locality', 100)]:
         value = raw.get(key, '')
         if not isinstance(value, str) or len(value) > limit: raise ValueError('Слишком длинный поисковый запрос')
@@ -90,6 +104,11 @@ def validate_plan(raw):
 
 def matching(item, plan):
     text = ' '.join((item.title, item.description, str(item.attributes.get('visible_params', ''))))
+    if plan.get('purpose') == 'tobacco_retail':
+        kind = item.attributes.get('property_type', '')
+        if kind in {'office', 'warehouse'}: return False
+        if re.search(r'готов\w* бизнес|имущественн\w* комплекс|производств|офис|склад', normalized(item.title)): return False
+        if not re.search(r'торгов|магазин|свободн\w* назнач|помещен', normalized(text)): return False
     if not words(plan['query']).issubset(words(text)): return False
     if plan['locality'] and normalized(plan['locality']) not in normalized(item.locality + ' ' + item.district + ' ' + str(item.attributes.get('visible_address', ''))): return False
     return ((plan['min_price'] is None or item.price_rub >= plan['min_price'])
@@ -138,7 +157,7 @@ def _turn(store, config, user_id, text, selected_id):
     key = 'conversation:' + str(user_id)
     context = json.loads(store.get_state(key, '{}'))
     history = context.get('history', [])[-8:]
-    previous = context.get('plan', {})
+    previous = context.get('pending_search') or context.get('plan', {})
     connected = chatgpt.status().get('connected')
     model = store.get_state('chatgpt_model')
     if connected and model:
@@ -154,6 +173,7 @@ def _turn(store, config, user_id, text, selected_id):
             'Пример: раньше обсуждали табачный магазин, сейчас «хочу дешёвую коммерцию»: category commercial, query пустой, locality пустой, цены null. '
             'Не подменяй дешёвую коммерцию конкретным видом бизнеса. Дешёвый — сортировка по цене, а не ключевое слово. '
             'В query только слова, которые должны быть в объявлении, не включай общие слова найди/купить/срочно. '
+            '«Помещение под табачную продукцию» означает назначение будущего магазина, а НЕ наличие этих слов в объявлении. query пустой. '
             'Приветствие, советы, планы бизнеса, как продать, сдать, оформить договор, налоги, деньги, законодательство — chat. '
             'Не запускай поиск для любого сообщения: «как сдать гараж» — chat, «найди гараж» — search. '
             'Вопрос о выборе или обсуждение — chat; анализ первого/второго/открытого объекта — analysis. '
@@ -164,7 +184,7 @@ def _turn(store, config, user_id, text, selected_id):
         except (ValueError, TypeError, KeyError):
             raise ValueError('Не удалось разобрать запрос. Напиши, например: Lexus IS 200 до 1 миллиона.') from None
     else:
-        plan = fallback_plan(text, previous)
+        plan = ground_plan(fallback_plan(text, previous), text, previous)
 
     source_note = ''
     results = []
@@ -175,8 +195,13 @@ def _turn(store, config, user_id, text, selected_id):
         try:
             imported = SOURCE.fetch(plan['category'], query=plan['query'])
             if imported is not None: store.upsert(imported)
-        except SourceUnavailable:
-            source_note = 'Прямой поиск источника временно недоступен; проверены сохранённые объявления.'
+        except SourceUnavailable as error:
+            reason = str(error)
+            message = ('Авито ограничил частоту запросов (HTTP 429).' if 'HTTP 429' in reason else
+                       'Авито отказал в доступе сборщику (HTTP 403).' if 'HTTP 403' in reason else
+                       'Авито не отдал доступный список объявлений.')
+            source_note = message + ' Поиск продолжается по сохранённым объявлениям всех подключённых площадок; это не общий отказ поиска.'
+            store.set_state('chat_source_error:' + str(user_id), json.dumps({'at': utc_now().isoformat(), 'reason': reason[:400]}, ensure_ascii=False))
         pool = store.all()
         search = replace(config.search, category=plan['category'], max_age_days=max(7, config.search.max_age_days))
         candidates = [r for r in ranked_feed(pool, search, recent_days=7, sort_mode='price_asc') if matching(r.listing, plan)]
@@ -203,7 +228,14 @@ def _turn(store, config, user_id, text, selected_id):
         if plan['intent'] == 'analysis':
             report = analyze(assess(selected, pool, replace(config.search, category=selected.category)), store) if connected else None
         else: report = json.loads(store.get_state('advisor:' + selected.id, 'null'))
-    if connected and model:
+    if plan['intent'] == 'clarify':
+        answer = ('Понял: ищем помещение для табачного магазина, а не объявления с упоминанием табака. '
+                  'Сначала нужно определить тип сделки: аренда или покупка? '
+                  'Подходящие помещения затем нужно проверить по характеристикам и действующим ограничениям торговли; само объявление не подтверждает допустимость такого использования.')
+        if plan.get('deal') == 'rent':
+            answer = ('Понял, нужна аренда помещения под табачный магазин. Автоматическая выдача сейчас настроена на продажу, поэтому не буду показывать её вместо аренды. '
+                      'Могу помочь составить требования к помещению и разобрать объявление, которое ты пришлёшь. Поиск аренды — пока неподключённая возможность.')
+    elif connected and model:
         needs_web = plan['intent'] != 'search' and bool(CURRENT_FACTS.search(text))
         instructions = (
             'Ты внимательный деловой собеседник и аналитик по недвижимости, автомобилям, личным финансам и малому бизнесу. '
@@ -223,6 +255,7 @@ def _turn(store, config, user_id, text, selected_id):
             'Отличай подтверждённые данные, расчёт по допущениям и неизвестное. Сначала дай полезную суть, не подменяй её отказом или общими предупреждениями.')
         payload = {'message': text, 'history': [] if plan['intent'] == 'search' and not followup(text) else history, 'plan': plan, 'new_results': len(results),
                    'matched': total_matches, 'already_shown': already_shown, 'source_note': source_note,
+                   'purpose_screening': 'Предварительные кандидаты под магазин: проверить первый этаж, вход, назначение, окружение и актуальные правовые ограничения; не объявлять юридически подходящими.' if plan.get('purpose') else None,
                    'selected': selected.to_dict() if selected else None, 'analysis': report,
                    'price_range': [results[0].listing.price_rub, results[-1].listing.price_rub] if results else None}
         try:
@@ -249,6 +282,8 @@ def _turn(store, config, user_id, text, selected_id):
         history=(history + [{'role': 'user', 'text': text}, {'role': 'assistant', 'text': answer[:1800]}])[-8:],
         shown=(context.get('shown', []) + [r.listing.id for r in results])[-500:])
     if plan['intent'] == 'search': context['result_ids'] = [r.listing.id for r in results]
+    if plan['intent'] == 'clarify': context['pending_search'] = plan
+    elif plan['intent'] == 'search': context.pop('pending_search', None)
     store.set_state(key, json.dumps(context, ensure_ascii=False))
     search_url = 'https://www.avito.ru/rostovskaya_oblast/' + PATHS[plan['category']] + '?' + urlencode({'q': plan['query']})
     return {'answer': answer, 'results': results, 'category': plan['category'], 'plan': plan,

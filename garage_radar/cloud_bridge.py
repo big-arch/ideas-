@@ -58,6 +58,11 @@ class LocalApp:
             if code == 401:
                 self.csrf = ''
                 if retry and 'data' not in value: return self.request(value,retry=False)
+            if code == 403 and result.get('error') == 'Сеанс не подтверждён' and retry:
+                # This exact loopback response is returned before reading or applying a POST.
+                # Refresh the expired desktop session once; do not retry any business failure.
+                with self.lock: self.connect()
+                return self.request(value, retry=False)
         if value['path'] == '/api/state' and code == 200:
             # Never send the desktop session/CSRF or account identity to a browser.
             result['csrf'] = 'telegram'

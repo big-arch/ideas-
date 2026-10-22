@@ -64,3 +64,17 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(self.server.store.listing_meta(123,'cheap')['hidden'],0)
         self.assertEqual(self.request('POST','/api/search/save',{'name':'bad','max_price':-5})[0],400)
         self.assertEqual(self.server.store.profiles(123),[])
+
+    def test_chat_boundary_owner_map_and_static_asset(self):
+        with patch('garage_radar.webapp.conversation_turn',return_value={'answer':'Уточним задачу.','category':'garage','results':[]}) as turn:
+            self.assertEqual(self.request('POST','/api/chat',{'text':'Привет'},csrf=False)[0],403)
+            turn.assert_not_called()
+            self.assertEqual(self.request('POST','/api/chat',{'text':'Привет','user_id':456})[0],200)
+            self.assertEqual(str(turn.call_args.args[2]),'123')
+        with patch('garage_radar.webapp.conversation_turn') as turn:
+            self.assertEqual(self.request('POST','/api/chat',{'text':'x','selected_id':['wrong']})[0],400)
+            turn.assert_not_called()
+        item=self.request('GET','/api/item?id=cheap')[1]['item']
+        self.assertEqual(item['map']['precision'],'address_search')
+        self.assertTrue(item['map']['embed'].startswith('https://yandex.ru/map-widget/'))
+        self.assertEqual(self.request('GET','/ui-chat.js')[0],200)
