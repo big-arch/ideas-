@@ -22,6 +22,7 @@ from .analysis import assess
 from .avito import SourceUnavailable
 from .config import load_config, load_env
 from .details import read_detail
+from .photos import GALLERY_VERSION, catalog_photos, listing_photos
 from .models import CATEGORIES, utc_now, timestamp
 from .network import RemoteError, photo_bytes
 from .presentation import ranked_feed, price_label
@@ -48,21 +49,28 @@ def quick_detail(item, store):
     except ValueError: cached = None
     if cached:
         try:
-            if (utc_now()-timestamp(cached['fetched_at'])).total_seconds()<21600: return cached
+            if cached.get('gallery_version') == GALLERY_VERSION and (utc_now()-timestamp(cached['fetched_at'])).total_seconds()<21600: return cached
         except (ValueError,KeyError): pass
+    fallback = {**(cached or {'description':item.description,'params':item.attributes.get('visible_params',''), 'scope':'catalog'}),
+                'photos': listing_photos([*catalog_photos(item), *(cached or {}).get('photos', [])], item.url),
+                'pending': True, 'error':'Загружаю фотографии и полную страницу объявления…'}
+    try: failure = json.loads(store.get_state('detail_retry:'+item.id,'null'))
+    except ValueError: failure = None
+    if failure and time.time()-failure.get('at',0)<300:
+        return {**fallback, 'pending':False, 'error':failure['error']}
     key = (str(store.path),item.id)
     with DETAIL_LOCK:
         if key not in DETAIL_PENDING:
             DETAIL_PENDING.add(key)
             def fetch():
                 try: read_detail(item,store)
-                except (SourceUnavailable,OSError,ValueError): pass
+                except (SourceUnavailable,OSError,ValueError):
+                    store.set_state('detail_retry:'+item.id,json.dumps({'at':time.time(),
+                        'error':'Полную галерею получить не удалось. Показаны доступные фото объявления.'},ensure_ascii=False))
                 finally:
                     with DETAIL_LOCK: DETAIL_PENDING.discard(key)
             DETAIL_WORKERS.submit(fetch)
-    return cached or {'description':item.description,'params':item.attributes.get('visible_params',''),
-        'photos':[item.photo_url] if item.photo_url else [],'scope':'catalog','pending':True,
-        'error':'Полная страница загружается в фоне. Сейчас показаны сведения каталога.'}
+    return fallback
 
 
 def register_sign_in(pending):
@@ -228,7 +236,7 @@ class Handler(BaseHTTPRequestHandler):
                 item = self.item(args.get("id"))
                 index = min(5, max(0, int(args.get("index", 0))))
                 cached = json.loads(store.get_state("detail:" + item.id, "{}"))
-                photos = cached.get("photos") or [item.photo_url]
+                photos = listing_photos([*catalog_photos(item), *cached.get('photos', [])], item.url)
                 if index >= len(photos): raise ValueError("Фото не найдено")
                 data, kind = photo_bytes(photos[index])
                 self.reply(data, kind=kind)

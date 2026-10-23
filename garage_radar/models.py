@@ -95,6 +95,11 @@ class Listing:
         if not isinstance(item.attributes, dict) or len(item.attributes) > 40:
             raise ValueError("attributes должен быть объектом характеристик")
         for key, value in item.attributes.items():
+            if key == 'photo_urls':
+                from .photos import listing_photos
+                if not isinstance(value, list) or len(value)>6 or value != listing_photos(value,item.url):
+                    raise ValueError('photo_urls должен содержать до шести уникальных фото источника')
+                continue
             if not isinstance(key, str) or not isinstance(value, (str, int, float)) or isinstance(value, bool):
                 raise ValueError("Характеристики должны быть строками или числами")
             if isinstance(value, (int, float)) and not math.isfinite(value):

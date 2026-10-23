@@ -7,6 +7,7 @@ from . import chatgpt
 from .analysis import render
 from .avito import SourceUnavailable
 from .details import read_detail
+from .photos import catalog_photos
 from .models import utc_now, timestamp
 from .network import photo_bytes, RemoteError
 
@@ -19,7 +20,7 @@ FOCUS = {
     "commercial": "Оцени назначение, площадь, этаж, вход, видимую готовность и возможность сдачи в аренду; трафик, разрешённое использование, пожарные требования и доходность не придумывай.",
 }
 
-REPORT_VERSION = 3
+REPORT_VERSION = 4
 
 
 def price_evidence(result):
@@ -82,7 +83,7 @@ def analyze(result, store) -> dict:
     except SourceUnavailable as error:
         detail_error = str(error)
         detail = {"description": item.description, "params": item.attributes.get("visible_params", ""),
-                  "photos": [item.photo_url] if item.photo_url else [], "scope": "catalog"}
+                  "photos": catalog_photos(item), "scope": "catalog"}
     stable_item = {k: v for k, v in item.to_dict().items() if k != "observed_at"}
     stable_detail = {k: v for k, v in detail.items() if k != "fetched_at"}
     fingerprint = hashlib.sha256(json.dumps([REPORT_VERSION,'area-v3',stable_item, stable_detail, model,price_evidence(result)], sort_keys=True).encode()).hexdigest()
@@ -93,10 +94,15 @@ def analyze(result, store) -> dict:
         if cached.get("fingerprint") == fingerprint: return cached
     images = []
     used_photos = []
-    for photo in detail["photos"][:3]:
+    seen_images = set()
+    for photo in detail["photos"][:6]:
+        if len(images) >= 4: break
         try:
             data, kind = photo_bytes(photo)
             if len(data) > 2_000_000: continue
+            digest = hashlib.sha256(data).digest()
+            if digest in seen_images: continue
+            seen_images.add(digest)
             images.append({"type": "input_image", "image_url": "data:" + kind + ";base64," + base64.b64encode(data).decode()})
             used_photos.append(photo)
         except RemoteError:

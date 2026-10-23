@@ -11,6 +11,7 @@ from urllib.request import urlopen
 
 from .models import Listing, normalized, utc_now
 from .dates import site_date
+from .photos import listing_photos
 
 PATHS = {
     "garage": "garazhi_i_mashinomesta",
@@ -36,6 +37,7 @@ class Card:
     currency: str = ""
     photo_url: str = ""
     photo_width: int = 0
+    photo_urls: list[str] = field(default_factory=list)
     texts: dict[str, list[str]] = field(default_factory=dict)
 
     def text(self, marker: str) -> str:
@@ -60,11 +62,12 @@ class CatalogParser(HTMLParser):
             self.current = Card(values["data-item-id"])
             self.root_depth = len(self.stack)
         if self.current:
-            if marker.startswith("slider-image/image-") and not self.current.photo_url:
+            if marker.startswith("slider-image/image-"):
                 image = marker.removeprefix("slider-image/image-")
                 host = urlsplit(image).hostname or ""
                 if image.startswith("https://") and (host == "img.avito.st" or host.endswith(".img.avito.st")):
-                    self.current.photo_url = image
+                    self.current.photo_urls.append(image)
+                    if not self.current.photo_url: self.current.photo_url = image
             if tag == "img":
                 candidates = []
                 for value in values.get("srcset", "").split(","):
@@ -74,6 +77,7 @@ class CatalogParser(HTMLParser):
                         candidates.append((width, parts[0]))
                 width, image = max(candidates) if candidates else (0, values.get("data-src", values.get("src", "")))
                 host = urlsplit(image).hostname or ""
+                self.current.photo_urls.extend(listing_photos([image]))
                 if (image.startswith("https://") and (host == "img.avito.st" or host.endswith(".img.avito.st"))
                         and (not self.current.photo_url or width > self.current.photo_width)):
                     self.current.photo_url = image
@@ -236,6 +240,7 @@ def convert(card: Card, category: str) -> Listing | None:
                 attributes["drive"] = kind
                 break
     basis = "per_m2" if re.search(r"за\s*(?:м[²2]|кв)|/\s*м[²2]", price_text) else "total"
+    attributes['photo_urls'] = listing_photos([card.photo_url, *card.photo_urls])
     try:
         return Listing.from_dict({
             "id": "avito-" + card.id, "url": url, "title": title, "description": description,

@@ -40,7 +40,19 @@ class AdvisorTests(unittest.TestCase):
         self.assertTrue(content[1]["image_url"].startswith("data:image/jpeg;base64,"))
         self.assertTrue(request.call_args_list[0].kwargs['require_web'])
         self.assertIn('8. Вопросы продавцу',instructions)
-        self.assertEqual(first['version'],3)
+        self.assertEqual(first['version'],4)
+
+    def test_four_distinct_images_skip_failed_and_duplicate_downloads(self):
+        from garage_radar.network import RemoteError
+        result=assess(listing(),peers(),Search())
+        urls=[f'https://10.img.avito.st/{i}.jpg' for i in range(6)]
+        detail={'description':'Текст','params':'','photos':urls,'scope':'detail'}
+        downloads=[(b'a','image/jpeg'),RemoteError(400),(b'a','image/jpeg'),(b'b','image/jpeg'),(b'c','image/jpeg'),(b'd','image/jpeg')]
+        with patch('garage_radar.advisor.chatgpt.status',return_value={'connected':True}),patch('garage_radar.advisor.read_detail',return_value=detail),patch('garage_radar.advisor.photo_bytes',side_effect=downloads),patch('garage_radar.advisor.chatgpt.respond',return_value={'text':'Ответ','citations':[]}) as respond:
+            report=analyze(result,self.store)
+        self.assertEqual(report['photos_analyzed'],4)
+        self.assertEqual(report['photo_urls'],[urls[i] for i in (0,3,4,5)])
+        self.assertEqual(len(respond.call_args.args[1])-1,4)
 
     def test_blocked_detail_and_missing_photo_are_not_hidden(self):
         from garage_radar.avito import SourceUnavailable

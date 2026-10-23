@@ -24,7 +24,7 @@ async function radarCloudApi(path, data) {
     return result;
   }
   const cached=readCache.get(path);
-  if(cached&&Date.now()-cached.at<20000)return structuredClone(cached.value);
+  if(cached&&!cached.value.detail?.pending&&Date.now()-cached.at<20000)return structuredClone(cached.value);
   if(readPending.has(path))return structuredClone(await readPending.get(path));
   const pending=cloudRequest(path).then(value=>{
     if(value.initial_list){readCache.set(value.initial_list.path,{at:Date.now(),value:structuredClone(value.initial_list.value)});delete value.initial_list}

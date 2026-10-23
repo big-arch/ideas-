@@ -11,6 +11,7 @@ from urllib.request import urlopen, build_opener, ProxyHandler
 from .avito import SourceUnavailable, VOID, number
 from .models import Listing, normalized, utc_now
 from .dates import site_date
+from .photos import listing_photos, image_attribute
 
 YANDEX_PATHS = {"garage": "garazh", "apartment": "kvartira/vtorichniy-rynok", "house": "dom",
                 "land": "uchastok", "commercial": "kommercheskaya-nedvizhimost"}
@@ -42,7 +43,7 @@ class VisibleCards(HTMLParser):
                 a.get("data-test") == "OffersSerpItem" if self.source == "yandex"
                 else a.get("data-ftid") == "bulls-list_bull")
         if root and self.current is None:
-            self.current = {"title": [], "price": [], "address": [], "description": [], "date": [], "url": "", "photo": ""}
+            self.current = {"title": [], "price": [], "address": [], "description": [], "date": [], "url": "", "photo": "", 'photos': []}
             self.depth = len(self.stack)
         marker = ""
         if self.current is not None:
@@ -65,13 +66,13 @@ class VisibleCards(HTMLParser):
             else:
                 marker = {"bull_title": "title", "bull_price": "price", "bull_location": "address",
                           "component_inline-bull-description": "description", "bull_date": "date"}.get(a.get("data-ftid"), "")
-            if tag == "img" and not self.current["photo"]:
-                candidates = a.get("srcset", "").split(",")
-                photo = candidates[-1].strip().split()[0] if candidates[-1].strip() else a.get("data-src", a.get("src", ""))
+            if tag == "img":
+                photo = image_attribute(a)
                 photo = urljoin("https://realty.yandex.ru", photo)
                 host = urlsplit(photo).hostname or ""
                 if photo.startswith("https://") and (host == "avatars.mds.yandex.net" or host.endswith(".auto.drom.ru") or host == "data.akula.com"):
-                    self.current["photo"] = photo
+                    self.current['photos'].append(photo)
+                    if not self.current['photo']: self.current["photo"] = photo
         if tag not in VOID:
             self.stack.append((tag, marker))
 
@@ -140,6 +141,7 @@ def parse_public(document: str, category: str, source: str) -> list[Listing]:
         if category != "car" and not area: continue
         group = "улица: " + address.split(",")[0] if address else ""
         attributes = {"source": source + "_public_html", "source_scope": "partial_catalog", "visible_address": address}
+        attributes['photo_urls'] = listing_photos(card['photos'], url)
         date_text = " ".join(" ".join(card["date"]).split())
         if source == "akula":
             match = re.search(r"\b\d{1,2}\s+[а-я]+\s+20\d{2}\b", date_text)
