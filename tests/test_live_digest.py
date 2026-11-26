@@ -7,7 +7,9 @@ import test_digests as support
 from garage_radar.analysis import assess
 from garage_radar.avito import SourceUnavailable
 from garage_radar.details import confirmed_for_digest, parse_detail, read_detail, ListingWithdrawn
-from garage_radar.models import utc_now
+from garage_radar.models import CATEGORIES, utc_now
+from garage_radar.bot import Bot
+from garage_radar.network import RemoteError
 from garage_radar.presentation import ranked_feed
 from garage_radar.schedule import due_slot
 from garage_radar.sources import parse_public
@@ -17,6 +19,68 @@ from urllib.error import HTTPError
 class LiveDigestTests(unittest.TestCase):
     setUp = support.DigestTests.setUp
     tearDown = support.DigestTests.tearDown
+
+    def enable_full(self):
+        self.store.set_state("schedule:123", "twelve")
+        for setting in ("prefcat:all", "volume:all"):
+            self.bot.handle({"callback_query":{"id":"q","data":setting,"from":{"id":123},
+                            "message":{"chat":{"id":123,"type":"private"}}}})
+        self.api.messages.clear()
+
+    def test_all_six_categories_in_one_price_order_without_discount_or_ten_card_cap(self):
+        self.enable_full()
+        categories = list(CATEGORIES)
+        items = [support.listing(identity=f"obj{i}", price=900000-1000*i, category=categories[i % 6])
+                 for i in range(27)]
+        self.store.upsert(items + [support.listing(identity="closed", active=False),
+                                  support.listing(identity="old", attributes={"site_date_at":(utc_now()-timedelta(days=8)).isoformat()})])
+        self.store.set_listing_meta(123, "obj3", hidden=True)
+        self.store.mark_delivered(123, items[5])
+        with patch.object(self.api,"send_card",wraps=self.api.send_card) as send:
+            self.bot.scheduled_digests()
+            Bot(self.bot.config,self.store,self.api,{123}).scheduled_digests()
+        sent = [c.args[1].listing for c in send.call_args_list]
+        self.assertEqual([i.id for i in sent], [i.id for i in reversed(items) if i.id not in {"obj3","obj5"}])
+        self.assertEqual({i.category for i in sent}, set(CATEGORIES))
+        self.assertEqual(len(self.api.messages), 25)
+        self.assertIn("отправлено 25", self.store.get_state("digest_last:123"))
+        self.assertEqual(self.store.get_state("digest_volume:456"), "")
+
+    def test_full_edition_resumes_after_crash_between_cards(self):
+        self.enable_full()
+        items = [support.listing(identity=f"new{i}", price=100000+i) for i in range(14)]
+        self.store.upsert(items)
+        now = utc_now()
+        with patch("garage_radar.bot.utc_now", return_value=now), patch("garage_radar.bot.confirmed_for_digest",
+                  side_effect=[True]*11+[KeyboardInterrupt]):
+            with self.assertRaises(KeyboardInterrupt):
+                self.bot.send_full_edition(123, "slot", int(now.timestamp()))
+        self.assertEqual(len(self.api.messages), 11)
+        resumed = Bot(self.bot.config,self.store,self.api,{123})
+        later = now + timedelta(minutes=4)
+        with patch("garage_radar.bot.utc_now", return_value=later):
+            resumed.send_full_edition(123, "slot", int(later.timestamp()))
+            resumed.send_full_edition(123, "slot", int(later.timestamp()))
+        self.assertEqual(len(self.api.messages), 14)
+        self.assertIn("отправлено 14", self.store.get_state("digest_last:123"))
+
+    def test_full_edition_respects_flood_wait_and_does_not_replay_an_unknown_send(self):
+        self.enable_full()
+        self.store.upsert([support.listing(identity=f"new{i}",price=100000+i) for i in range(4)])
+        now = utc_now()
+        calls = []
+        def network(chat, result, keyboard):
+            calls.append(result.listing.id)
+            if len(calls) == 2: raise RemoteError(429, 600)
+            if len(calls) == 4: raise RemoteError()
+            return {"message_id":len(calls)}
+        with patch.object(self.api, "send_card", side_effect=network):
+            for seconds,slot in ((0,"one"),(350,"two"),(601,"two"),(610,"two")):
+                when = now + timedelta(seconds=seconds)
+                with patch("garage_radar.bot.utc_now", return_value=when):
+                    self.bot.send_full_edition(123,slot,int(when.timestamp()))
+        self.assertEqual(calls, ["new0","new1","new1","new2","new3"])
+        self.assertEqual(self.store.delivered_ids(123, []), {"new0","new1","new3"})
 
     def test_bumping_site_date_cannot_turn_a_known_old_listing_into_a_new_one(self):
         now = utc_now()

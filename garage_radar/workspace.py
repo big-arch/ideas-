@@ -6,12 +6,13 @@ STAGES = {'':'Без статуса','interested':'Интересен','contacte
 VIEWS = {'all':'Все доступные','unseen':'Только непросмотренные','hidden':'Скрытые','drops':'Цена снизилась',**{k:v for k,v in STAGES.items() if k}}
 
 
-def validate_profile(data: dict) -> dict:
+def validate_profile(data: dict, *, allow_all=False) -> dict:
     value = {'name':str(data.get('name','')).strip()[:80], 'category':data.get('category','garage'),
              'locality':str(data.get('locality','')).strip()[:160],
              'include':str(data.get('include','')).strip()[:400], 'exclude':str(data.get('exclude','')).strip()[:400],
              'alerts': data.get('alerts',True)}
-    if not value['name'] or value['category'] not in CATEGORIES or type(value['alerts']) is not bool:
+    valid_category = value['category'] in CATEGORIES or (allow_all and value['category'] == 'all')
+    if not value['name'] or not valid_category or type(value['alerts']) is not bool:
         raise ValueError('Укажи название, категорию и настройку уведомлений')
     for field in ('min_price','max_price'):
         raw = data.get(field)
@@ -25,7 +26,7 @@ def validate_profile(data: dict) -> dict:
 
 
 def matches_profile(item, profile: dict) -> bool:
-    if item.category != profile['category']: return False
+    if profile['category'] != 'all' and item.category != profile['category']: return False
     if profile.get('min_price') is not None and item.price_rub < profile['min_price']: return False
     if profile.get('max_price') is not None and item.price_rub > profile['max_price']: return False
     address = normalized(' '.join((item.locality,item.district,item.attributes.get('visible_address',''))))

@@ -35,7 +35,7 @@ HELP = (
     "Найди интересное предложение в Ростове и области.\n\n"
     "Выбери категорию ниже: покажу фотографии, цены, местоположение и сравнение с похожими объявлениями."
 )
-CATEGORY_KEYBOARD = {"keyboard": [["🔎 Категории", "📬 Сводка 10 объектов"],
+CATEGORY_KEYBOARD = {"keyboard": [["🔎 Категории", "📬 Сводка сейчас"],
                                    ["⚙️ Мои сводки", "📊 Источники"]],
                      "resize_keyboard": True, "is_persistent": True}
 CHOICES = list(CATEGORIES.items())
@@ -89,7 +89,7 @@ class Telegram:
     def call(self, method: str, payload: dict) -> object:
         response = post_json(self._base + method, payload)
         if not response.get("ok"):
-            raise RemoteError(int(response.get("error_code", 0)))
+            raise RemoteError(int(response.get("error_code", 0)), int(response.get("parameters", {}).get("retry_after", 5)))
         return response.get("result")
 
     def send(self, chat_id: int, text: str, keyboard: dict | None = None) -> None:
@@ -216,30 +216,35 @@ class Bot:
                 with self.advisor_lock: self.chat_queued -= 1
         self.chat_worker.submit(complete)
 
-    def publish(self, chat_id, result, keyboard):
+    def publish(self, chat_id, result, keyboard, *, edition=""):
         # Scheduled scans and Telegram commands can select the same object concurrently.
         with self.delivery_lock:
-            if result.listing.id in self.store.delivered_ids(chat_id, [result.listing]):
-                return None
-            return self._publish(chat_id, result, keyboard)
+            return self._publish(chat_id, result, keyboard, edition)
 
-    def _publish(self, chat_id, result, keyboard):
-        def remember(message):
-            self.store.mark_delivered(chat_id,result.listing)
-            if isinstance(message,dict) and message.get('message_id'):
-                self.store.set_state(f"card_keyboard:{chat_id}:{message['message_id']}",json.dumps(keyboard,ensure_ascii=False))
-            return message if message is not None else True
+    def _publish(self, chat_id, result, keyboard, edition):
         meta = self.store.listing_meta(chat_id,result.listing.id)
         for row in keyboard.get('inline_keyboard',[]):
             for button in row:
                 if button.get('callback_data')=='favorite:'+result.listing.id:
                     button['text']='★ Сохранено' if meta['favorite'] else '☆ Сохранить'
-        if not chatgpt.status()["connected"] and not self.model:
-            return remember(self.telegram.send_card(chat_id, result, keyboard))
-        cached = json.loads(self.store.get_state("advisor:" + result.listing.id, "null"))
-        if not current_report(cached,result): cached = None
-        message = self.telegram.send_card(chat_id, result, keyboard, cached)
-        remember(message)
+        use_ai = bool(chatgpt.status()["connected"] or self.model)
+        cached = json.loads(self.store.get_state("advisor:" + result.listing.id, "null")) if use_ai else None
+        if cached and not current_report(cached, result): cached = None
+        if not self.store.reserve_delivery(chat_id, result.listing, edition):
+            return None
+        try:
+            message = (self.telegram.send_card(chat_id, result, keyboard, cached) if use_ai else
+                       self.telegram.send_card(chat_id, result, keyboard))
+        except RemoteError as error:
+            # A timeout can follow an accepted Telegram post. Only a definite rejection is safe to retry.
+            if 400 <= error.status < 500:
+                self.store.release_delivery(chat_id, result.listing)
+            raise
+        self.store.mark_delivered(chat_id, result.listing)
+        if isinstance(message, dict) and message.get('message_id'):
+            self.store.set_state(f"card_keyboard:{chat_id}:{message['message_id']}", json.dumps(keyboard, ensure_ascii=False))
+        if not use_ai:
+            return message if message is not None else True
         key = (chat_id, result.listing.id, result.listing.price_rub)
         if not cached:
             with self.advisor_lock:
@@ -347,12 +352,18 @@ class Bot:
         categories = self.digest_categories(chat_id)
         category_buttons = [{"text": ("✓ " if c in categories else "○ ") + label, "callback_data": "prefcat:" + c}
                             for c, label in CATEGORIES.items()]
-        keyboard = {"inline_keyboard": [category_buttons[i:i + 2] for i in range(0, len(category_buttons), 2)] + [
+        full = self.store.get_state(f"digest_volume:{chat_id}") == "all"
+        keyboard = {"inline_keyboard": [[{"text": ("✓ " if len(categories) == len(CATEGORIES) else "") + "Все категории",
+                                         "callback_data": "prefcat:all"}]]
+            + [category_buttons[i:i + 2] for i in range(0, len(category_buttons), 2)]
+            + [[{"text": ("✓ " if full else "") + "Все новые", "callback_data": "volume:all"},
+                {"text": ("✓ " if not full else "") + "До 10 за выпуск", "callback_data": "volume:ten"}]] + [
             [{"text": ("✓ " if key == mode else "") + label, "callback_data": "schedule:" + key}] for key, label in SCHEDULE_LABELS.items()
         ] + [[{'text':'Мои поиски','callback_data':'mysearches'},{'text':'Режим выдачи','callback_data':'myviews'}],
              [{"text": "Получить 10 объектов сейчас", "callback_data": "digestnow"}]]}
         text = ("📬 Твои сводки\n\n" + SCHEDULE_LABELS.get(mode, SCHEDULE_LABELS["off"]) + " · МСК\n"
-                "До 10 объектов в каждой сводке\n\nКатегории: " + ", ".join(CATEGORIES[c] for c in categories) +
+                + ("Все новые объявления автоматически" if full else "До 10 объектов в каждой автосводке") +
+                "\n\nКатегории: " + ", ".join(CATEGORIES[c] for c in categories) +
                 "\nПоследняя проверка · " + self.store.get_state(f"digest_last:{chat_id}", "ожидается") +
                 "\n\nВыбери категории для рассылки. Если новых подтверждённых объектов нет, бот дождётся следующего обновления.")
         self.telegram.send(chat_id, text, keyboard)
@@ -365,7 +376,8 @@ class Bot:
         return [{"text": label, "callback_data": prefix + ":" + value} for value, label in
                 (("newest", "🕒 Новые"), ("price_asc", "Цена ↑"), ("price_desc", "Цена ↓"))]
 
-    def send_digest(self, chat_id: int, *, automatic: bool = False, offset: int = 0, token: str = "") -> int:
+    def send_digest(self, chat_id: int, *, automatic: bool = False, offset: int = 0, token: str = "",
+                    edition: str = "", can_continue=None) -> int:
         pool = self.store.all()
         delivered = self.store.delivered_ids(chat_id,pool)
         state_key = f"digest_snapshot:{chat_id}"
@@ -376,22 +388,40 @@ class Bot:
                 snapshot = json.loads(self.store.get_state(state_key))
                 if snapshot["token"] != token or snapshot.get('context',context)!=context: raise ValueError()
             except (ValueError, KeyError, TypeError):
-                self.telegram.send(chat_id, "Подборка уже обновилась. Нажми «Сводка 10 объектов» для свежих результатов.")
+                self.telegram.send(chat_id, "Подборка уже обновилась. Нажми «Сводка сейчас» для свежих результатов.")
                 return 0
             check_pages = bool(snapshot.get("check_pages", False))
             ids = snapshot["ids"]
         else:
             check_pages = automatic
         # Browsing a saved search, hidden objects or a different category must not silence the subscription.
-        combined = [r for category in categories for r in filter_results(self.store, chat_id,
-                    ranked_feed(pool, replace(self.config.search, category=category), recent_days=7,
-                                sort_mode=self.sort_mode(chat_id)), view="all")]
+        combined = filter_results(self.store, chat_id, ranked_feed(pool, self.config.search, recent_days=7,
+                    sort_mode=self.sort_mode(chat_id), categories=categories), view="all")
+        if automatic and (edition or self.store.get_state(f"digest_volume:{chat_id}") == "all"):
+            sent = 0
+            for result in combined:
+                item = result.listing
+                if item.id in delivered:
+                    continue
+                if can_continue is not None and not can_continue():
+                    break
+                now = utc_now()
+                if (not in_scope(item, replace(self.config.search, category=item.category), now)
+                        or not recent(item, now) or not confirmed_for_digest(item, self.store)):
+                    continue
+                if can_continue is not None and not can_continue():
+                    break
+                try:
+                    message = self.publish(chat_id, result, card_keyboard(item), edition=edition)
+                except RemoteError as error:
+                    if error.status != 400:
+                        raise
+                    LOG.warning("Telegram rejected one listing card; continuing the edition")
+                    continue
+                if message is not None:
+                    sent += 1
+            return sent
         if not token:
-            mode = self.sort_mode(chat_id)
-            if mode == "newest":
-                combined.sort(key=lambda r: timestamp(r.listing.attributes["site_date_at"]), reverse=True)
-            else:
-                combined.sort(key=lambda r: r.listing.price_rub, reverse=mode == "price_desc")
             ids = [r.listing.id for r in combined]
             token = secrets.token_hex(6)
         by_id = {r.listing.id: r for r in combined}
@@ -429,6 +459,9 @@ class Bot:
             if not slot: continue
             key = f"digest_slot:{chat_id}:{slot}"
             now = int(utc_now().timestamp())
+            if self.store.get_state(f"digest_volume:{chat_id}") == "all":
+                self.send_full_edition(chat_id, slot, now)
+                continue
             if not self.store.claim_digest_slot(key, now): continue
             try:
                 count = self.send_digest(chat_id, automatic=True)
@@ -442,6 +475,54 @@ class Bot:
                 self.store.set_state(f"digest_last:{chat_id}", f"{slot}: доставка не завершена")
                 if error.status == 403: self.store.subscribe(chat_id, False)
                 raise
+
+    def send_full_edition(self, chat_id: int, slot: str, now: int) -> None:
+        pause_key = f"digest_pause_until:{chat_id}"
+        if int(self.store.get_state(pause_key, "0")) > now:
+            return
+        key = f"digest_all_slot:{chat_id}:{slot}"
+        token = secrets.token_hex(8)
+        claim = f"sending:{now + 180}:{token}"
+        if not self.store.claim_digest_slot(key, now, claim):
+            return
+        renew_at = now + 60
+        schedule = self.store.get_state(f"schedule:{chat_id}")
+        categories = self.digest_categories(chat_id)
+        def can_continue():
+            nonlocal claim, renew_at
+            if (chat_id not in self.store.subscribers() or self.store.get_state(f"schedule:{chat_id}") != schedule
+                    or self.store.get_state(f"digest_volume:{chat_id}") != "all"
+                    or self.digest_categories(chat_id) != categories):
+                return False
+            clock = int(utc_now().timestamp())
+            if clock >= renew_at:
+                renewed = f"sending:{clock + 180}:{token}"
+                if not self.store.replace_claim(key, claim, renewed):
+                    return False
+                claim, renew_at = renewed, clock + 60
+            return True
+        try:
+            self.send_digest(chat_id, automatic=True, edition=key, can_continue=can_continue)
+            count = self.store.edition_count(chat_id, key)
+            if count and can_continue():
+                state, note = f"sent:{count}", f"отправлено {count}"
+            else:
+                state = f"empty:{int(utc_now().timestamp()) + self.config.source_refresh_seconds}"
+                note = f"отправлено {count}" if count else "нет новых подтверждённых объектов"
+        except RemoteError as error:
+            if error.status == 403:
+                self.store.subscribe(chat_id, False)
+                state, note = "failed", "Telegram отключил доставку"
+            else:
+                resume_at = int(utc_now().timestamp()) + error.retry_after
+                if error.status == 429:
+                    self.store.set_state(pause_key, str(resume_at))
+                state = f"empty:{resume_at}"
+                note = "Telegram не подтвердил доставку, продолжу рассылку после паузы"
+        if self.store.replace_claim(key, claim, state):
+            self.store.set_state(f"digest_last:{chat_id}", utc_now().astimezone(MOSCOW).strftime("%d.%m %H:%M МСК") + " · " + note)
+            if self.store.edition_count(chat_id, key):
+                self.store.set_state(f"digest_sent:{chat_id}", utc_now().isoformat())
 
     def search_for(self, chat_id: int):
         threshold = float(self.store.get_state(f"discount:{chat_id}", str(self.config.search.discount)))
@@ -613,14 +694,18 @@ class Bot:
                 value = data.split(":", 1)[1]
                 self.show_feed(chat["id"], minimum_discount=None if value == "all" else int(value) / 100)
                 return
-            if data == "digestnow" or data.startswith(("prefcat:", "schedule:")):
+            if data == "digestnow" or data.startswith(("prefcat:", "schedule:", "volume:")):
                 chat_id = chat["id"]
                 self.telegram.call("answerCallbackQuery", {"callback_query_id": callback["id"]})
                 if data == "digestnow":
                     self.send_digest(chat_id)
                     return
                 kind, value = data.split(":", 1)
-                if kind == "prefcat" and value in CATEGORIES:
+                if kind == "prefcat" and value == "all":
+                    self.store.set_state(f"digest_categories:{chat_id}", ",".join(CATEGORIES))
+                elif kind == "volume" and value in {"all", "ten"}:
+                    self.store.set_state(f"digest_volume:{chat_id}", value)
+                elif kind == "prefcat" and value in CATEGORIES:
                     categories = self.digest_categories(chat_id)
                     if value in categories and len(categories) > 1:
                         categories.remove(value)
@@ -684,7 +769,7 @@ class Bot:
             return
         text = {"Все объявления": "/digest", "Ещё объявления": "/more",
                 "🔎 Категории": "/category", "📊 Источники": "/status",
-                "📬 Сводка 10 объектов": "/summary", "📬 Сводка 20 объектов": "/summary", "⚙️ Мои сводки": "/settings",
+                "📬 Сводка сейчас": "/summary", "📬 Сводка 10 объектов": "/summary", "📬 Сводка 20 объектов": "/summary", "⚙️ Мои сводки": "/settings",
                 "От 10%": "/discount 10", "От 20%": "/discount 20", "От 30%": "/discount 30"}.get(text, text)
         command, _, argument = text.partition(" ")
         command = command.split("@")[0].lower()
@@ -873,14 +958,14 @@ class Bot:
                 if result.listing.id in self.store.delivered_ids(chat_id,[result.listing]):
                     continue
                 try:
-                    self.publish(chat_id, result, card_keyboard(result.listing))
+                    if self.publish(chat_id, result, card_keyboard(result.listing)) is None:
+                        continue
                 except RemoteError as error:
                     if error.status == 403:
                         self.store.subscribe(chat_id, False)
                         break
                     raise
                 self.store.mark_notified(chat_id, result.listing)
-                self.store.mark_delivered(chat_id, result.listing)
                 sent += 1
                 if sent >= 5:
                     break

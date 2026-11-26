@@ -50,3 +50,24 @@ test('numbered and markdown AI sections display an independent brief',()=>{
   assert.equal(r.run('brief(sample)'),'Измерить ворота.');
   assert.equal(r.run('reportSections(sample)[1].title'),'Цена и аналоги');
 });
+
+test('catalog navigation appends the next page once and reaches the last item',async()=>{
+  const r=runtime(), calls=[];
+  r.context.document.querySelector=()=>({scrollTop:0});
+  r.context.document.getElementById('rows').querySelector=()=>null;
+  r.context.fetchPage=async path=>{
+    const query=new URL(path,'https://example.org').searchParams;
+    calls.push(query.get('after'));
+    const offset=Number(query.get('after')||0);
+    return {items:Array.from({length:Math.min(10,23-offset)},(_,i)=>({id:String(offset+i)})),
+      next:offset<20?String(offset+10):null,count:23};
+  };
+  r.run("api=fetchPage;renderRows=()=>{};globalThis.listQuery=()=> 'category=all&sort=price_asc&view=all';");
+  await r.run('loadList()');
+  await r.run('Promise.all([loadList({more:true}),loadList({more:true})])');
+  await r.run('loadList({more:true})');
+  await r.run('loadList({more:true})');
+  assert.deepEqual(calls,[null,'10','20']);
+  assert.equal(r.run('items.length'),23);
+  assert.equal(r.run('items[22].id'),'22');
+});

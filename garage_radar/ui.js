@@ -1,7 +1,7 @@
 'use strict';
-let state,items=[],selected=null,category='garage',favoriteOnly=false,currentDetail=null,activeTab='facts',analysisRunningFor=null,analysisQueuedFor=null,analysisLoading=false,analysisError='',photoIndex=0,requestVersion=0,visibleCount=10;
+let state,items=[],selected=null,category='all',favoriteOnly=false,currentDetail=null,activeTab='facts',analysisRunningFor=null,analysisQueuedFor=null,analysisLoading=false,analysisError='',photoIndex=0,requestVersion=0,visibleCount=10;
 const el=id=>document.getElementById(id);
-let listRequestVersion=0;
+let listRequestVersion=0,listTotal=0,nextPage=null,listLoading=false;
 const money=n=>new Intl.NumberFormat('ru-RU',{style:'currency',currency:'RUB',maximumFractionDigits:0}).format(n);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(path,data){const r=await fetch(path,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':state.csrf},body:JSON.stringify(data)});let value=await r.json();if(!r.ok)throw Error(value.error||'Не удалось завершить запрос');return value}
@@ -55,17 +55,49 @@ function renderRows(){
   const pane=document.querySelector('.list'), position=pane.scrollTop;
   const list=items.filter(x=>currentlyVisible(x)&&(!favoriteOnly||x.favorite)&&(el('viewFilter').value!=='unseen'||!x.meta?.seen)&&(!el('ratedOnly').checked||(typeof x.price_analysis?.discount==='number'&&!['insufficient','excluded'].includes(x.price_analysis.status))));
   const rows=el('rows');rows.replaceChildren();
-  for(const x of list.slice(0,visibleCount)){
+  for(const x of list){
     const button=document.createElement('button');button.className='row'+(x.id===selected?' selected':'');
     const photoHtml=x.photo_url?`<img class="thumb" loading="lazy" src="${photo(x.id)}" alt="">`:'<span class="thumb missing-photo">Без фото</span>';
     button.innerHTML=photoHtml+`<div class="row-body"><div class="row-price"><strong>${esc(money(x.price_rub))}</strong></div><div class="title">${esc(x.title)}</div>${comparisonBadge(x)}<div class="row-location">${cityBadge(x)}<small>${esc(x.source)}</small></div><small class="catalog-stamp">${esc(catalogStamp(x))}</small>${x.meta?.stage?'<small>'+esc(state.stages[x.meta.stage])+'</small>':''}${x.price_change?'<small class="row-state">Цена снизилась</small>':''}</div>`;
     button.onclick=()=>openItem(x.id);rows.append(button)
   }
   if(!list.length){const note=document.createElement('div');note.className='feed-empty';note.innerHTML='<strong>Свежих совпадений пока нет</strong><p>Попробуй другую категорию или измени фильтры. Новые предложения появятся после обновления источников.</p>';rows.append(note)}
-  if(list.length>visibleCount){const more=document.createElement('button');more.className='more-list';more.textContent='Ещё '+Math.min(10,list.length-visibleCount)+' объявлений';more.onclick=()=>{visibleCount+=10;renderRows()};rows.append(more)}
-  el('count').textContent='Показано '+Math.min(list.length,visibleCount)+' из '+list.length+' · за 7 дней';pane.scrollTop=position
+  if(nextPage){const more=document.createElement('button');more.className='more-list';more.textContent=listLoading?'Загружаю…':'Ещё объявления';more.disabled=listLoading;more.onclick=()=>loadList({more:true});rows.append(more)}
+  el('count').textContent='Показано '+list.length+' из '+Math.max(list.length,listTotal-(items.length-list.length))+' · за 7 дней';pane.scrollTop=position
 }
-async function loadList({background=false}={}){const version=++listRequestVersion,query=listQuery();if(!background){items=[];el('rows').innerHTML='<div class="loading" role="status"><p>Загружаю актуальные объявления…</p></div>';el('count').textContent='Обновляю список…'}try{let data=await api('/api/list?'+query);if(version!==listRequestVersion)return;items=data.items;if(!background){visibleCount=10;document.querySelector('.list').scrollTop=0}renderRows()}catch(e){if(version===listRequestVersion){if(!background)el('rows').textContent=e.message;toast(e.message)}}}
+async function loadList({background=false,more=false}={}) {
+  if((more || background) && listLoading)return;
+  if(more && !nextPage)return;
+  const version=++listRequestVersion,query=new URLSearchParams(listQuery());
+  const target=background?Math.max(10,visibleCount):10;
+  let cursor=more?nextPage:null,loaded=more?[...items]:[],added=0;
+  listLoading=true;
+  if(!more && !background){
+    items=[];nextPage=null;listTotal=0;visibleCount=10;
+    el('rows').innerHTML='<div class="loading" role="status"><p>Загружаю актуальные объявления…</p></div>';
+    el('count').textContent='Обновляю список…';
+  }else if(more){renderRows()}
+  try{
+    do{
+      query.set('limit',String(Math.min(50,target-added)));
+      if(cursor)query.set('after',cursor);
+      const data=await api('/api/list?'+query);
+      if(version!==listRequestVersion)return;
+      loaded.push(...data.items);added+=data.items.length;
+      cursor=data.next||null;listTotal=data.count;
+      if(!data.items.length)break;
+    }while(background && cursor && added<target);
+    items=[...new Map(loaded.map(item=>[item.id,item])).values()];nextPage=cursor;
+    visibleCount=items.length;
+    if(!background && !more)document.querySelector('.list').scrollTop=0;
+  }catch(error){
+    if(version!==listRequestVersion)return;
+    if(!background && !more){el('rows').textContent=error.message;el('count').textContent='Не удалось загрузить подборку';return}
+    toast(error.message);
+  }finally{
+    if(version===listRequestVersion){listLoading=false;if(more || background || items.length || el('rows').querySelector('.loading'))renderRows()}
+  }
+}
 async function openItem(id){const version=++requestVersion;selected=id;currentDetail=null;analysisError='';photoIndex=0;el('photoViewer').close();renderRows();el('layout').classList.add('detail-open');el('detail').innerHTML='<div class="loading" role="status"><div class="skeleton photo-skeleton"></div><div class="skeleton short"></div><div class="skeleton"></div><p>Читаю полную страницу объявления…</p></div>';try{let data=await api('/api/item?id='+encodeURIComponent(id));if(version!==requestVersion)return;data.item.meta={...data.item.meta,seen:true};const row=items.find(x=>x.id===id);if(row)row.meta=data.item.meta;api('/api/meta',{id,changes:{seen:true}}).then(seen=>{if(selected===id&&currentDetail)currentDetail.item.meta=seen.meta;if(row)row.meta=seen.meta;renderRows()}).catch(()=>toast('Просмотр не удалось сохранить'));currentDetail=data;renderRows();activeTab='facts';analysisLoading=analysisAvailable()&&currentlyVisible(data.item)&&!data.analysis;renderDetail();watchGallery(id,version);if(analysisLoading)runAnalysis()}catch(e){if(version===requestVersion)el('detail').textContent=e.message}}
 function mapPanel(item){
   const map=item.map;if(!map)return '';
@@ -114,13 +146,13 @@ async function runAnalysis(){const id=selected;if(!id||!currentDetail||!currentl
 async function connect(){try{el('connect').disabled=true;const data=await api('/api/connect',{});location.assign(data.url)}catch(e){toast(e.message);el('connect').disabled=false}}
 async function openSettings(){if(!el('settings').open)el('settings').showModal();try{state=await api('/api/state')}catch(e){toast(e.message)}renderServiceState();const progress=state.auth_progress||{};el('accountStatus').textContent=state.chatgpt.connected?'Подключён аккаунт '+(state.chatgpt.email||'ChatGPT'):(state.chatgpt.login_required?'Сеанс ChatGPT истёк. Войди повторно на компьютере, чтобы вернуть анализ фотографий.':progress.message||'Вход в ChatGPT доступен на компьютере с Радаром.');el('connect').hidden=state.chatgpt.connected;el('modelSection').hidden=!state.chatgpt.connected;if(state.chatgpt.connected){try{const d=await api('/api/models');state.model=d.selected;el('model').replaceChildren();for(const m of d.models){const o=document.createElement('option');o.value=m.id;o.textContent=m.name;o.selected=m.id===state.model;el('model').append(o)}}catch(e){el('accountStatus').textContent+=' Не удалось загрузить модели: '+e.message}}}
 el('disconnect').onclick=async()=>{try{const r=await api('/api/disconnect',{});state.chatgpt.connected=false;el('modelSection').hidden=true;el('connect').hidden=false;el('connection').textContent='ChatGPT отключён';el('accountStatus').textContent=r.remote_confirmed?'Подключение отключено.':'Локальный доступ отключён. Отзыв на сервере не подтверждён; отключи приложение также в настройках ChatGPT.'}catch(e){toast(e.message)}};
-el('settingsButton').onclick=openSettings;el('closeSettings').onclick=()=>el('settings').close();el('connect').onclick=connect;el('saveModel').onclick=async()=>{try{await api('/api/model',{model:el('model').value});state.model=el('model').value;toast('Модель сохранена.')}catch(e){toast(e.message)}};el('sort').onchange=async()=>{await api('/api/preferences',{sort:el('sort').value});await loadList()};el('favoriteFilter').onclick=()=>{favoriteOnly=!favoriteOnly;visibleCount=10;el('favoriteFilter').classList.toggle('active',favoriteOnly);renderRows()};el('closePhoto').onclick=()=>el('photoViewer').close();
+el('settingsButton').onclick=openSettings;el('closeSettings').onclick=()=>el('settings').close();el('connect').onclick=connect;el('saveModel').onclick=async()=>{try{await api('/api/model',{model:el('model').value});state.model=el('model').value;toast('Модель сохранена.')}catch(e){toast(e.message)}};el('sort').onchange=async()=>{await api('/api/preferences',{sort:el('sort').value});await loadList()};el('favoriteFilter').onclick=()=>{favoriteOnly=!favoriteOnly;visibleCount=10;el('favoriteFilter').classList.toggle('active',favoriteOnly);loadList()};el('closePhoto').onclick=()=>el('photoViewer').close();
 function renderServiceState(){
   el('connection').textContent=state.chatgpt.connected?'ChatGPT подключён':state.local_ai?'Ollama · анализ текста':'ИИ не подключён';
   const box=el('deliveryStatus'),delivery=state.delivery;
   if(!box||!delivery)return;
   box.querySelector('strong').textContent=delivery.enabled?delivery.schedule+' · МСК':'Рассылка выключена';
-  box.querySelector('p').textContent=delivery.categories.join(' · ');
+  box.querySelector('p').textContent=(delivery.volume==='all'?'Все новые автоматически':'До 10 новых за выпуск')+' · '+delivery.categories.join(' · ');
   box.querySelector('small').textContent=delivery.last_check?'Последняя проверка '+delivery.last_check:'Ожидается первая проверка';
 }
-(async()=>{try{state=await api('/api/state');renderServiceState();for(const[k,label]of Object.entries(state.categories)){const b=document.createElement('button');b.textContent=label;b.dataset.category=k;b.className=k===category?'active':'';b.onclick=async()=>{await api('/api/search/activate',{id:'',category:k});state.active_profile='';profileDraft=null;renderProfiles();fillSearch(null);category=k;favoriteOnly=false;el('favoriteFilter').classList.remove('active');el('categoryTitle').textContent=label;document.querySelectorAll('#categories button').forEach(n=>n.classList.remove('active'));b.classList.add('active');loadList()};el('categories').append(b)}initWorkspace();await loadList();const params=new URLSearchParams(location.search);if(params.get('item'))await openItem(params.get('item'));if(state.notice){toast(state.notice);openSettings()}if(params.has('connect')){history.replaceState(null,'','/');await connect()}}catch(e){toast(e.message)}})();
+(async()=>{try{state=await api('/api/state');renderServiceState();for(const[k,label]of Object.entries({all:'Все категории',...state.categories})){const b=document.createElement('button');b.textContent=label;b.dataset.category=k;b.className=k===category?'active':'';b.onclick=async()=>{await api('/api/search/activate',{id:'',category:k});state.active_profile='';profileDraft=null;renderProfiles();fillSearch(null);selectCategory(k);favoriteOnly=false;el('favoriteFilter').classList.remove('active');await loadList()};el('categories').append(b)}initWorkspace();await loadList();const params=new URLSearchParams(location.search);if(params.get('item'))await openItem(params.get('item'));if(state.notice){toast(state.notice);openSettings()}if(params.has('connect')){history.replaceState(null,'','/');await connect()}}catch(e){toast(e.message)}})();

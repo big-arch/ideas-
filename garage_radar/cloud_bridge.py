@@ -70,8 +70,8 @@ class LocalApp:
             result['auth_progress'] = {}
             # Bootstrap the first list in the same cloud round trip as settings.
             category = next((p['category'] for p in result.get('profiles',[])
-                if p['id']==result.get('active_profile')),result.get('category','garage'))
-            path = '/api/list?'+urlencode({'category':category,'sort':result.get('sort','price_asc'),'view':result.get('view','all')})
+                if p['id']==result.get('active_profile')),result.get('browse_category','all'))
+            path = '/api/list?'+urlencode({'category':category,'sort':result.get('sort','price_asc'),'view':result.get('view','all'),'limit':10})
             feed = self.request({'path':path})
             if feed['code']==200: result['initial_list'] = {'path':path,'value':feed['value']}
         return {'code': code, 'value': result}

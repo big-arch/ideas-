@@ -29,6 +29,10 @@ class Store:
                     chat_id INTEGER, listing_id TEXT, identity TEXT NOT NULL,
                     delivered_at TEXT NOT NULL, PRIMARY KEY(chat_id,listing_id));
                 CREATE INDEX IF NOT EXISTS sent_objects_identity ON sent_objects(chat_id,identity);
+                CREATE TABLE IF NOT EXISTS delivery_attempts (
+                    chat_id INTEGER NOT NULL, listing_id TEXT NOT NULL, identity TEXT NOT NULL,
+                    edition TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(chat_id,listing_id), UNIQUE(chat_id,identity));
                 CREATE TABLE IF NOT EXISTS listing_state (
                     user_id TEXT, listing_id TEXT, seen INTEGER NOT NULL DEFAULT 0,
                     hidden INTEGER NOT NULL DEFAULT 0, favorite INTEGER NOT NULL DEFAULT 0,
@@ -179,12 +183,18 @@ class Store:
         with self.connection() as db:
             return db.execute("INSERT OR IGNORE INTO state VALUES (?, ?)", (key, value)).rowcount == 1
 
-    def claim_digest_slot(self, key: str, now: int) -> bool:
+    def claim_digest_slot(self, key: str, now: int, claim: str = "sending") -> bool:
         with self.connection() as db:
-            claimed = db.execute("INSERT INTO state(key,value) VALUES (?, 'sending') "
-                "ON CONFLICT(key) DO UPDATE SET value='sending' WHERE state.value LIKE 'empty:%' "
-                "AND CAST(substr(state.value,7) AS INTEGER)<=?", (key, now))
+            claimed = db.execute("INSERT INTO state(key,value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value "
+                "WHERE (state.value LIKE 'empty:%' AND CAST(substr(state.value,7) AS INTEGER)<=?) "
+                "OR (state.value LIKE 'sending:%' AND CAST(substr(state.value,9) AS INTEGER)<=?)",
+                (key, claim, now, now))
             return claimed.rowcount == 1
+
+    def replace_claim(self, key: str, claim: str, value: str) -> bool:
+        with self.connection() as db:
+            return db.execute("UPDATE state SET value=? WHERE key=? AND value=?", (value, key, claim)).rowcount == 1
 
     def subscribe(self, chat_id: int, enabled: bool) -> None:
         with self.connection() as db:
@@ -225,10 +235,32 @@ class Store:
         ids, identities = {r[0] for r in rows}, {r[1] for r in rows}
         return ids | {item.id for item in pool if self.object_identity(item) in identities}
 
+    def reserve_delivery(self, chat_id: int, item: Listing, edition: str) -> bool:
+        identity = self.object_identity(item)
+        with self.connection() as db:
+            row = db.execute(
+                "INSERT OR IGNORE INTO delivery_attempts(chat_id,listing_id,identity,edition) "
+                "SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM sent_objects "
+                "WHERE chat_id=? AND (listing_id=? OR identity=?))",
+                (chat_id, item.id, identity, edition, chat_id, item.id, identity))
+            return row.rowcount == 1
+
+    def release_delivery(self, chat_id: int, item: Listing) -> None:
+        with self.connection() as db:
+            db.execute("DELETE FROM delivery_attempts WHERE chat_id=? AND listing_id=? AND confirmed=0", (chat_id, item.id))
+
+    def edition_count(self, chat_id: int, edition: str) -> int:
+        with self.connection() as db:
+            return db.execute("SELECT count(*) FROM delivery_attempts WHERE chat_id=? AND edition=? AND confirmed=1",
+                              (chat_id, edition)).fetchone()[0]
+
     def mark_delivered(self, chat_id: int, item: Listing) -> None:
         with self.connection() as db:
             db.execute('INSERT OR IGNORE INTO sent_objects VALUES (?,?,?,?)',
                        (chat_id,item.id,self.object_identity(item),utc_now().isoformat()))
+            db.execute("UPDATE delivery_attempts SET confirmed=1 WHERE chat_id=? AND listing_id=? AND edition<>''",
+                       (chat_id, item.id))
+            db.execute("DELETE FROM delivery_attempts WHERE chat_id=? AND listing_id=? AND edition=''", (chat_id, item.id))
 
     def migrate_deliveries(self, chat_id: int) -> None:
         """Recover old deliveries from persisted post buttons, never guess by date."""

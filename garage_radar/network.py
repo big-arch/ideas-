@@ -11,7 +11,16 @@ class RemoteError(RuntimeError):
     def __init__(self, status: int = 0, retry_after: int = 5):
         super().__init__(f"Внешний сервис недоступен (код {status}); секреты скрыты")
         self.status = status
-        self.retry_after = min(300, max(1, retry_after))
+        self.retry_after = max(1, retry_after) if status == 429 else min(300, max(1, retry_after))
+
+
+def http_failure(error: HTTPError) -> RemoteError:
+    try:
+        data = json.loads(error.read(8192))
+        delay = int(data.get("parameters", {}).get("retry_after", 5))
+    except (ValueError, AttributeError, TypeError):
+        delay = 5
+    return RemoteError(error.code, delay)
 
 
 def post_json(url: str, payload: dict, timeout: int = 45) -> dict:
@@ -27,13 +36,7 @@ def post_json(url: str, payload: dict, timeout: int = 45) -> dict:
             raise RemoteError()
         return parsed
     except HTTPError as error:
-        delay = 5
-        try:
-            body = json.loads(error.read(8192))
-            delay = int(body.get("parameters", {}).get("retry_after", 5))
-        except (ValueError, AttributeError, TypeError):
-            pass
-        raise RemoteError(error.code, delay) from None
+        raise http_failure(error) from None
     except (URLError, TimeoutError, OSError, ValueError):
         # URLError may contain a URL with the Telegram token; do not propagate it.
         raise RemoteError() from None
@@ -78,6 +81,6 @@ def post_photos(url: str, payload: dict, files: dict[str, tuple[bytes, str]]) ->
             raise RemoteError(int(parsed.get("error_code", 0)) if isinstance(parsed, dict) else 0)
         return parsed
     except HTTPError as error:
-        raise RemoteError(error.code) from None
+        raise http_failure(error) from None
     except (URLError, TimeoutError, OSError, ValueError):
         raise RemoteError() from None

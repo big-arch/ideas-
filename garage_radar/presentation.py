@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from html import escape
+from dataclasses import replace
 from datetime import timedelta
 
 from .analysis import Assessment, assess, in_scope, money
@@ -76,20 +77,29 @@ def full_card(result: Assessment, detail: dict) -> str:
     return "\n".join(str(x) for x in lines if x is not None)
 
 
+def catalog_order(result: Assessment, mode: str) -> tuple:
+    item = result.listing
+    if mode == "newest":
+        return -timestamp(item.attributes["site_date_at"]).timestamp(), item.id
+    return (-item.price_rub if mode == "price_desc" else item.price_rub), item.id
+
+
 def ranked_feed(pool: list[Listing], search: Search, minimum_discount: float | None = None,
-                *, recent_days: int | None = None, sort_mode: str = "discount") -> list[Assessment]:
+                *, recent_days: int | None = None, sort_mode: str = "discount", categories=None) -> list[Assessment]:
     now = utc_now()
-    eligible = [item for item in pool if not item.demo and in_scope(item, search, now)]
-    results = [assess(item, eligible, search, now) for item in eligible
+    scopes = {key: replace(search, category=key) for key in (categories if categories is not None else [search.category])}
+    eligible = {key: [] for key in scopes}
+    for item in pool:
+        if item.category in scopes and not item.demo and in_scope(item, scopes[item.category], now):
+            eligible[item.category].append(item)
+    results = [assess(item, peers, scopes[key], now) for key, peers in eligible.items() for item in peers
                if recent_days is None or recent(item, now, recent_days)]
     if minimum_discount is not None:
         results = [r for r in results if r.status not in {"insufficient", "excluded"}
                    and r.discount is not None and r.discount + 1e-12 >= minimum_discount]
     def order(result: Assessment):
-        if sort_mode in {"price_asc", "price_desc"}:
-            return (result.listing.price_rub * (1 if sort_mode == "price_asc" else -1), result.listing.id)
-        if sort_mode == "newest":
-            return (-timestamp(result.listing.attributes["site_date_at"]).timestamp(), result.listing.id)
+        if sort_mode in {"price_asc", "price_desc", "newest"}:
+            return catalog_order(result, sort_mode)
         reliable = result.status not in {"insufficient", "excluded"} and result.discount is not None
         group = 0 if reliable and result.discount > 0 else 1 if not reliable else 2
         return group, -(result.discount or 0) if reliable else result.listing.price_rub, result.listing.id

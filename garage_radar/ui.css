@@ -23,6 +23,7 @@
 @media(max-width:600px){.chat-launch{bottom:12px;right:12px}.assistant-chat{width:100vw;height:94dvh;max-height:94dvh;max-width:100vw;border-radius:22px 22px 0 0;margin:auto 0 0}.chat-header,.chat-messages{padding:14px}.assistant-chat form{padding:10px 12px 4px}.assistant-chat form button{padding:10px}.chat-bubble.user{margin-left:20px}}
 
 .chat-source-link{display:block;font-size:13px;margin:0 0 16px}.chat-launch{color:var(--on-accent)}
+.search-editor [hidden]{display:none}
 .row-body{min-width:0;flex:1}.row-body .title{font-size:1rem;font-weight:600;line-height:1.35;margin:3px 0 7px}
 .row .row-price strong{font-size:1.3rem;letter-spacing:-.025em;font-variant-numeric:tabular-nums}
 .row .thumb{width:clamp(70px,21%,98px);height:auto;aspect-ratio:4/5;object-fit:cover;border-radius:12px}

@@ -62,12 +62,8 @@ async function refreshCloud() {
   if (cloudRefreshBusy || document.hidden || typeof state === 'undefined' || !state || analysisRunningFor) return;
   cloudRefreshBusy = true;
   readCache.clear();
-  const scroll = document.querySelector('.list')?.scrollTop;
-  const count = visibleCount;
   try {
     await loadList({background:true});
-    visibleCount = count; renderRows();
-    if (scroll !== undefined) document.querySelector('.list').scrollTop = scroll;
     if (selected && currentDetail) {
       const detail = await api('/api/item?id=' + encodeURIComponent(selected));
       if (selected === detail.item.id) { currentDetail = detail; renderDetail(); }

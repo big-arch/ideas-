@@ -1,10 +1,11 @@
 import http.client
 import json
 import unittest
+from urllib.parse import urlencode
 from unittest.mock import patch
 
 from garage_radar.config import Config, Search
-from garage_radar.models import utc_now
+from garage_radar.models import CATEGORIES, utc_now
 from test_radar import listing
 import test_webapp_signin as signin_support
 
@@ -51,6 +52,30 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(self.server.store.listing_meta(456,'cheap')['stage'],'')
         self.request('POST','/api/search/delete',{'id':saved['selected']})
         self.assertEqual(self.request('GET','/api/state')[1]['profiles'],[])
+
+    def test_combined_feed_reaches_every_category_and_last_page_including_unrated(self):
+        clock = utc_now().isoformat()
+        categories = list(CATEGORIES)
+        self.server.store.upsert([listing(f"many-{i:03}", price=800000+i//3, category=categories[i%6],
+                                  attributes={"site_date_at":clock}) for i in range(162)])
+        self.assertEqual(self.request('POST','/api/search/activate',{'id':'','category':'all'})[0],200)
+        self.assertEqual(self.request('GET','/api/state')[1]['browse_category'],'all')
+        self.assertNotEqual(self.server.store.category(123,'garage'),'all')
+        query = {'category':'all','limit':50,'sort':'price_asc'}
+        seen = []
+        while True:
+            code, result = self.request('GET','/api/list?'+urlencode(query))
+            self.assertEqual(code,200)
+            self.assertEqual(result['count'],164)
+            seen.extend(result['items'])
+            if result['next'] is None: break
+            query['after'] = result['next']
+        self.assertEqual({r['category'] for r in seen},set(CATEGORIES))
+        self.assertEqual(len({r['id'] for r in seen}),164)
+        self.assertEqual([(r['price_rub'],r['id']) for r in seen],sorted((r['price_rub'],r['id']) for r in seen))
+        self.assertEqual(seen[-1]['id'],'many-161')
+        self.request('POST','/api/meta',{'id':'many-161','changes':{'favorite':True}})
+        self.assertEqual([x['id'] for x in self.request('GET','/api/list?category=all&limit=1&favorite=1')[1]['items']],['many-161'])
 
     def test_hidden_restoration_and_unseen_filter(self):
         self.request('POST','/api/meta',{'id':'cheap','changes':{'hidden':True,'seen':True}})

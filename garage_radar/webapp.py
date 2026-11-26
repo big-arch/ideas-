@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import secrets
 import threading
@@ -26,7 +27,7 @@ from .details import read_detail
 from .photos import GALLERY_VERSION, catalog_photos, listing_photos
 from .models import CATEGORIES, utc_now, timestamp
 from .network import RemoteError, photo_bytes
-from .presentation import ranked_feed, price_label
+from .presentation import catalog_order, ranked_feed, price_label
 from .sources import source_name
 from .storage import Store
 from .workspace import STAGES, VIEWS, validate_profile, active_profile, filter_results, watched
@@ -212,6 +213,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply({"csrf": session["csrf"], "chatgpt": chatgpt.status(), "model": store.get_state("chatgpt_model"),
                             "local_ai": bool(os.getenv("OLLAMA_MODEL", "").strip()),
                             "delivery": {"enabled": subscribed and mode != "off", "schedule": SCHEDULE_LABELS.get(mode),
+                                         "volume": store.get_state(f"digest_volume:{owner}", "ten"),
                                          "categories": [CATEGORIES[c] for c in chosen.split(",") if c in CATEGORIES],
                                          "last_check": store.get_state(f"digest_last:{owner}"),
                                          "last_sent": store.get_state(f"digest_sent:{owner}")},
@@ -221,6 +223,7 @@ class Handler(BaseHTTPRequestHandler):
                             'view':store.get_state(f'view:{self.user_id()}','all'),
                             'sort':store.get_state(f'sort:{self.user_id()}','price_asc'),
                             'category':store.category(self.user_id(),config.search.category),
+                            'browse_category':store.get_state(f'miniapp_category:{owner}', 'all'),
                             "categories": CATEGORIES, "notice": session.pop("notice", ""),
                             "schedule": store.get_state("schedule:" + store.get_state("owner_chat_id"), "off")})
             elif path.path in {"/ui.css", "/ui.js", '/ui-workspace.js', '/ui-chat.js'}:
@@ -233,14 +236,31 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply({"models": available, "selected": store.get_state("chatgpt_model")})
             elif path.path == "/api/list":
                 category = args.get("category", "garage")
-                if category not in CATEGORIES: raise ValueError("Неизвестная категория")
-                search = replace(config.search, category=category)
-                results = ranked_feed(store.all(), search, recent_days=7, sort_mode=args.get("sort", "price_asc"))
-                profile = active_profile(store,self.user_id())
+                if category != "all" and category not in CATEGORIES: raise ValueError("Неизвестная категория")
+                sort = args.get("sort", "price_asc")
+                if sort not in {"price_asc", "price_desc", "newest"}: raise ValueError("Неизвестный порядок")
+                limit = int(args.get("limit", 150))
+                if not 1 <= limit <= 150: raise ValueError("Неверный размер страницы")
+                results = ranked_feed(store.all(), config.search, recent_days=7, sort_mode=sort,
+                                      categories=CATEGORIES if category == "all" else [category])
+                profile = active_profile(store,self.user_id()) if category != "all" else None
                 if any(k in args for k in ('min_price','max_price','locality','include','exclude')):
-                    profile = validate_profile({**args,'category':category,'name':'Текущий поиск'})
+                    profile = validate_profile({**args,'category':category,'name':'Текущий поиск'}, allow_all=True)
                 results = filter_results(store,self.user_id(),results,view=args.get('view'),profile=profile)
-                self.reply({"items": [self.serialize(r.listing, r) for r in results[:150]], "count": len(results)})
+                if args.get("rated") == "1":
+                    results = [r for r in results if r.discount is not None and r.status not in {"excluded", "insufficient"}]
+                if args.get("favorite") == "1":
+                    results = [r for r in results if store.listing_meta(self.user_id(), r.listing.id)["favorite"]]
+                count = len(results)
+                if "after" in args:
+                    cursor = json.loads(args["after"])
+                    if (not isinstance(cursor, list) or len(cursor) != 2 or type(cursor[0]) not in (int, float)
+                            or (type(cursor[0]) is float and not math.isfinite(cursor[0])) or not isinstance(cursor[1], str)):
+                        raise ValueError("Неверная страница")
+                    results = [r for r in results if catalog_order(r, sort) > tuple(cursor)]
+                page = results[:limit]
+                self.reply({"items": [self.serialize(r.listing, r) for r in page], "count": count,
+                            "next": json.dumps(catalog_order(page[-1], sort)) if len(results) > limit else None})
             elif path.path == "/api/item":
                 item = self.item(args.get("id"))
                 detail = quick_detail(item, store)
@@ -320,16 +340,19 @@ class Handler(BaseHTTPRequestHandler):
                 store.save_profile(self.user_id(),ident,profile)
                 store.set_state(f'active_search:{self.user_id()}',ident)
                 store.set_category(self.user_id(),profile['category'])
+                store.set_state(f'miniapp_category:{self.user_id()}',profile['category'])
                 self.reply({'profiles':store.profiles(self.user_id()),'selected':ident})
             elif self.path == '/api/search/activate':
                 ident = data.get('id','')
                 profile = next((p for p in store.profiles(self.user_id()) if p['id']==ident),None)
                 if ident and not profile: raise ValueError('Поиск не найден')
-                if not ident and 'category' in data and data['category'] not in CATEGORIES:
+                if not ident and 'category' in data and data['category'] not in {*CATEGORIES, 'all'}:
                     raise ValueError('Неизвестная категория')
                 store.set_state(f'active_search:{self.user_id()}',ident)
-                if profile: store.set_category(self.user_id(),profile['category'])
-                elif 'category' in data: store.set_category(self.user_id(),data['category'])
+                chosen = profile['category'] if profile else data.get('category')
+                if chosen:
+                    store.set_state(f'miniapp_category:{self.user_id()}',chosen)
+                    if chosen != 'all': store.set_category(self.user_id(),chosen)
                 self.reply({'ok':True})
             elif self.path == '/api/search/delete':
                 store.delete_profile(self.user_id(),str(data.get('id','')))
