@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from garage_radar.advisor import analyze
+from garage_radar.advisor import REPORT_VERSION, analyze, current_report, decision_facts
 from garage_radar.analysis import assess
 from garage_radar.config import Search
 from garage_radar.storage import Store
@@ -40,7 +40,8 @@ class AdvisorTests(unittest.TestCase):
         self.assertTrue(content[1]["image_url"].startswith("data:image/jpeg;base64,"))
         self.assertTrue(request.call_args_list[0].kwargs['require_web'])
         self.assertIn('8. Вопросы продавцу',instructions)
-        self.assertEqual(first['version'],4)
+        self.assertEqual(first['version'],REPORT_VERSION)
+        self.assertFalse(current_report(first,replace(result,listing=replace(result.listing,description='Новые условия'))))
 
     def test_four_distinct_images_skip_failed_and_duplicate_downloads(self):
         from garage_radar.network import RemoteError
@@ -63,3 +64,21 @@ class AdvisorTests(unittest.TestCase):
         self.assertEqual(answer["photos_analyzed"],0)
         self.assertEqual(answer["detail_scope"],"catalog")
         self.assertEqual(answer["detail_error"],"closed")
+
+    def test_local_report_uses_real_text_and_keeps_photo_and_web_unverified(self):
+        item = listing(description="Указан отдельный въезд")
+        result = assess(item, peers(), Search())
+        self.store.upsert(peers())
+        detail = {"description": item.description, "params":"", "photos":["cover"], "scope":"detail"}
+        model_reply = {"message":{"content":json.dumps({"conclusion":"Уточните ширину въезда.",
+            "checks":"Замерить ворота.", "questions":"Какая ширина проёма?"})}}
+        with patch.dict("os.environ", {"OLLAMA_MODEL":"local-test"}), patch("garage_radar.advisor.chatgpt.status",return_value={"connected":False}), patch("garage_radar.advisor.read_detail",return_value=detail), patch("garage_radar.advisor.post_json",return_value=model_reply) as request:
+            report = analyze(result, self.store)
+            self.assertEqual(report["provider"],"ollama")
+            self.assertEqual(report["photos_analyzed"],0)
+            self.assertFalse(report["web_requested"])
+            self.assertIn("отдельный въезд",request.call_args.args[1]["messages"][1]["content"])
+            self.assertEqual(report["decision_facts"]["difference_rub"],400000)
+            self.assertEqual(decision_facts(result,self.store)["unit_rub_m2"],25000)
+            self.assertEqual(analyze(result,self.store),report)
+            request.assert_called_once()

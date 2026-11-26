@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import threading
 import time
@@ -30,6 +31,9 @@ from .sources import source_name
 from .storage import Store
 from .workspace import STAGES, VIEWS, validate_profile, active_profile, filter_results, watched
 from dataclasses import replace
+from datetime import timedelta
+from .schedule import SCHEDULE_LABELS
+from .sources import PUBLIC_SOURCES
 
 PORT = 8766
 ORIGIN = f"http://127.0.0.1:{PORT}"
@@ -128,6 +132,14 @@ class Handler(BaseHTTPRequestHandler):
     def serialize(self, item, result=None):
         value = item.to_dict()
         value["source"] = source_name(item)
+        if item.attributes.get("source") in PUBLIC_SOURCES:
+            expires = timestamp(item.observed_at) + timedelta(hours=1)
+            if item.attributes.get("first_seen_at"):
+                expires = min(expires, timestamp(item.attributes["first_seen_at"]) + timedelta(days=7))
+            if item.attributes.get("site_date_at"):
+                try: expires = min(expires, timestamp(item.attributes["site_date_at"]) + timedelta(days=7))
+                except (ValueError, TypeError, AttributeError): expires = timestamp(item.observed_at)
+            value["available_until"] = expires.isoformat() if item.active and item.attributes.get("site_date_at") else item.observed_at
         value['map'] = listing_map(item)
         value["comparison"] = price_label(result) if result else ""
         value['price_analysis'] = ({'discount':result.discount,'status':result.status,
@@ -193,7 +205,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             store, config = self.server.store, self.server.config
             if path.path == "/api/state":
+                owner = self.user_id()
+                mode = store.get_state(f"schedule:{owner}", "off")
+                subscribed = str(owner) in {str(subscriber) for subscriber in store.subscribers()}
+                chosen = store.get_state(f"digest_categories:{owner}") or store.category(owner, config.search.category)
                 self.reply({"csrf": session["csrf"], "chatgpt": chatgpt.status(), "model": store.get_state("chatgpt_model"),
+                            "local_ai": bool(os.getenv("OLLAMA_MODEL", "").strip()),
+                            "delivery": {"enabled": subscribed and mode != "off", "schedule": SCHEDULE_LABELS.get(mode),
+                                         "categories": [CATEGORIES[c] for c in chosen.split(",") if c in CATEGORIES],
+                                         "last_check": store.get_state(f"digest_last:{owner}"),
+                                         "last_sent": store.get_state(f"digest_sent:{owner}")},
                             "auth_progress": json.loads(store.get_state("chatgpt_auth_progress", "{}")),
                             'stages':STAGES,'views':VIEWS,'profiles':store.profiles(self.user_id()),
                             'active_profile':store.get_state(f'active_search:{self.user_id()}'),

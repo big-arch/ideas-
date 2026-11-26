@@ -32,6 +32,7 @@ class SourceUnavailable(RuntimeError):
 @dataclass
 class Card:
     id: str
+    active: bool = True
     url: str = ""
     price: float = 0
     currency: str = ""
@@ -62,6 +63,8 @@ class CatalogParser(HTMLParser):
             self.current = Card(values["data-item-id"])
             self.root_depth = len(self.stack)
         if self.current:
+            if marker in {"item-closed", "item/sold", "item/closed-warning"}:
+                self.current.active = False
             if marker.startswith("slider-image/image-"):
                 image = marker.removeprefix("slider-image/image-")
                 host = urlsplit(image).hostname or ""
@@ -249,7 +252,7 @@ def convert(card: Card, category: str) -> Listing | None:
             "ownership": "unknown", "land_rights": "unknown", "condition": "unknown",
             "observed_at": utc_now().isoformat(), "category": category, "attributes": attributes,
             "transaction": "rent" if is_rent else "sale", "price_basis": basis,
-            "photo_url": card.photo_url,
+            "photo_url": card.photo_url, "active": card.active,
         })
     except ValueError:
         return None

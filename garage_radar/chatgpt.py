@@ -32,6 +32,10 @@ LOCK = threading.RLock()
 CLOCK_SKEW_SECONDS = 30
 
 
+class LoginExpired(RemoteError):
+    """The issuer explicitly rejected renewal of this account's grant."""
+
+
 @contextmanager
 def credential_lock():
     """Serialize rotating refresh tokens between the bot and local application."""
@@ -103,6 +107,14 @@ def request_json(url: str, data: dict | None = None, token: str = "") -> dict:
         if not isinstance(parsed, dict): raise RemoteError()
         return parsed
     except HTTPError as error:
+        if url == TOKEN and data and data.get("grant_type") == "refresh_token" and error.code in {400, 401}:
+            try:
+                info = json.loads(error.read(8192)).get("error")
+                code = info.get("code") if isinstance(info, dict) else info
+            except (ValueError, AttributeError):
+                code = None
+            if code in {"invalid_grant", "refresh_token_expired", "refresh_token_reused"}:
+                raise LoginExpired(error.code) from None
         raise RemoteError(error.code) from None
     except (OSError, URLError, ValueError):
         raise RemoteError() from None
@@ -172,9 +184,15 @@ def access_token() -> str:
     with credential_lock():
         record = load()
         if not record: raise ValueError("Сначала подключи ChatGPT в локальном приложении")
+        if record.get("login_required"):
+            raise LoginExpired(401)
         if record["expires_at"] < time.time() + 120:
-            fresh = request_json(TOKEN, dict(grant_type="refresh_token", client_id=record["client_id"],
-                                refresh_token=record["refresh_token"], resource=RESOURCE))
+            try:
+                fresh = request_json(TOKEN, dict(grant_type="refresh_token", client_id=record["client_id"],
+                                    refresh_token=record["refresh_token"], resource=RESOURCE))
+            except LoginExpired:
+                save({**record, "login_required": True})
+                raise
             if not fresh.get("access_token"): raise RemoteError(401)
             record.update(fresh)
             record["expires_at"] = time.time() + int(fresh.get("expires_in", 3600))
@@ -185,7 +203,8 @@ def access_token() -> str:
 def status() -> dict:
     try:
         record = load()
-        return {"connected": bool(record), "email": record.get("email", "")}
+        return {"connected": bool(record) and not record.get("login_required", False),
+                "login_required": bool(record.get("login_required")), "email": record.get("email", "")}
     except (OSError, ValueError):
         return {"connected": False, "email": "", "error": "Хранилище требует повторного входа"}
 

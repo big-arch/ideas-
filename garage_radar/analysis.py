@@ -128,10 +128,13 @@ def unconfirmed_token_price(item: Listing) -> bool:
 
 def in_scope(item: Listing, search: Search, now: datetime) -> bool:
     age = now - timestamp(item.observed_at)
+    maximum_age = timedelta(days=search.max_age_days)
+    if item.attributes.get("source") in PUBLIC_SOURCES:
+        maximum_age = min(maximum_age, timedelta(hours=1))
     return (not unconfirmed_token_price(item) and item.active and item.category == search.category and item.transaction == "sale" and item.price_basis == "total"
             and normalized(item.region) == normalized(search.region)
             and (not search.locality or normalized(item.locality) == normalized(search.locality))
-            and timedelta(0) <= age <= timedelta(days=search.max_age_days))
+            and timedelta(0) <= age <= maximum_age)
 
 
 @dataclass(frozen=True)

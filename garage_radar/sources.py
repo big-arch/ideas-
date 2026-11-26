@@ -43,10 +43,12 @@ class VisibleCards(HTMLParser):
                 a.get("data-test") == "OffersSerpItem" if self.source == "yandex"
                 else a.get("data-ftid") == "bulls-list_bull")
         if root and self.current is None:
-            self.current = {"title": [], "price": [], "address": [], "description": [], "date": [], "url": "", "photo": "", 'photos': []}
+            self.current = {"title": [], "price": [], "address": [], "description": [], "date": [], "url": "", "photo": "", 'photos': [], "active": True}
             self.depth = len(self.stack)
         marker = ""
         if self.current is not None:
+            if a.get("data-ftid") == "bull_sold" or any(c in {"offer-snippet_sold", "OffersSerpItem_archived"} for c in classes):
+                self.current["active"] = False
             href = a.get("href", "")
             if self.source == "akula":
                 if tag == "a" and re.fullmatch(r"/prodaja/(?:garage|kvartira|dom)/(?:[^/]+/)?[^/]+-r\d+\.html", href): self.current["url"] = href
@@ -165,7 +167,7 @@ def parse_public(document: str, category: str, source: str) -> list[Listing]:
             item = Listing.from_dict(dict(id=source + "-" + ident, url=url, title=title, description=description,
                 region="Ростовская область", locality=locality, district=group, price_rub=price_rub, area_m2=area,
                 garage_type=garage_type, ownership="unknown", land_rights="unknown", condition="unknown",
-                observed_at=utc_now().isoformat(), category=category, attributes=attributes, photo_url=card["photo"]))
+                observed_at=utc_now().isoformat(), category=category, attributes=attributes, photo_url=card["photo"], active=card["active"]))
             found[item.id] = item
         except ValueError:
             continue

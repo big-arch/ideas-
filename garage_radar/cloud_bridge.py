@@ -66,7 +66,7 @@ class LocalApp:
         if value['path'] == '/api/state' and code == 200:
             # Never send the desktop session/CSRF or account identity to a browser.
             result['csrf'] = 'telegram'
-            result['chatgpt'] = {'connected': bool(result.get('chatgpt', {}).get('connected'))}
+            result['chatgpt'] = {key: bool(result.get('chatgpt', {}).get(key)) for key in ('connected', 'login_required')}
             result['auth_progress'] = {}
             # Bootstrap the first list in the same cloud round trip as settings.
             category = next((p['category'] for p in result.get('profiles',[])

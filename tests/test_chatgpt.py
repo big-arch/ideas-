@@ -39,6 +39,18 @@ class ConnectionTests(unittest.TestCase):
             with self.assertRaises(ValueError): chatgpt.finish({**self.query,"state":"wrong"}, self.pending)
             request.assert_not_called()
 
+    def test_rejected_refresh_marks_relogin_and_preserves_account_binding(self):
+        from urllib.error import HTTPError
+        chatgpt.save({"expires_at":0,"client_id":"local-client","subject":"test-owner","refresh_token":"example"})
+        response = HTTPError(chatgpt.TOKEN,400,"",{},io.BytesIO(b'{"error":"invalid_grant"}'))
+        with patch.object(chatgpt,"urlopen",side_effect=response) as request:
+            for _ in range(2):
+                with self.assertRaises(chatgpt.LoginExpired): chatgpt.access_token()
+            request.assert_called_once()
+        self.assertTrue(chatgpt.status()["login_required"])
+        self.assertFalse(chatgpt.status()["connected"])
+        self.assertEqual(chatgpt.load()["subject"],"test-owner")
+
     def test_nonce_issuer_audience_and_granted_permission_are_verified(self):
         for changed in ({"nonce":"wrong"},{"iss":"https://other.example"},{"aud":"other-client"}):
             with self.subTest(changed=changed), patch.object(chatgpt, "request_json",return_value=self.tokens(**changed)), patch.object(jwt,"PyJWKClient") as client:

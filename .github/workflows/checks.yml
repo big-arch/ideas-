@@ -16,7 +16,7 @@ jobs:
           node-version: '22'
       - run: python -m pip install -e .
       - run: python -m unittest discover -s tests
-      - run: node --test tests/telegram-auth.test.mjs
+      - run: node --test tests/gallery.test.mjs tests/telegram-auth.test.mjs
       - run: python miniapp/build.py
       - run: node --check miniapp/dist/ui.js
       - run: node --check miniapp/dist/telegram.js

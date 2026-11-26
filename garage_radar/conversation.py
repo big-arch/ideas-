@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import os
 import threading
 import secrets
 import time
@@ -15,7 +16,7 @@ from .advisor import analyze
 from .analysis import assess
 from .avito import PublicAvito, SourceUnavailable, PATHS
 from .models import CATEGORIES, normalized, utc_now
-from .network import RemoteError
+from .network import RemoteError, post_json
 from .presentation import ranked_feed
 
 SOURCE = PublicAvito(max_pages=1)
@@ -130,6 +131,21 @@ def fallback_plan(text, previous):
     return validate_plan({'intent': 'search', 'category': category, 'query': text[:160], 'locality': ''})
 
 
+def local_answer(instructions, content, *, model, web=False, require_web=False, timeout=60):
+    if web or require_web:
+        raise RemoteError()
+    payload = {"model":model, "stream":False, "think":False,
+               "options":{"num_ctx":6144,"num_predict":650,"temperature":0.2},
+               "messages":[{"role":"system","content":instructions + " Ты работаешь локально, доступа к интернету и фотографиям в этом диалоге нет."},
+                           {"role":"user","content":content[0]["text"]}]}
+    if "Верни только JSON" in instructions:
+        payload["format"] = "json"
+    raw = post_json("http://127.0.0.1:11434/api/chat", payload, timeout)
+    message = raw.get("message", {}).get("content")
+    if not isinstance(message, str) or not message.strip(): raise RemoteError()
+    return {"text":message.strip(), "citations":[]}
+
+
 def turn(store, config, user_id, text, *, selected_id=None):
     if not isinstance(text, str) or not 1 <= len(text.strip()) <= 1600:
         raise ValueError('Напиши сообщение от 1 до 1600 символов')
@@ -159,9 +175,10 @@ def _turn(store, config, user_id, text, selected_id):
     history = context.get('history', [])[-8:]
     previous = context.get('pending_search') or context.get('plan', {})
     connected = chatgpt.status().get('connected')
-    model = store.get_state('chatgpt_model')
-    if connected and model:
-        response = chatgpt.respond(
+    model = store.get_state('chatgpt_model') if connected else os.getenv("OLLAMA_MODEL","")
+    respond = chatgpt.respond if connected else local_answer
+    if model:
+        response = respond(
             'Ты определяешь намерение собеседника в диалоге об автомобилях, недвижимости, продаже, аренде и деньгах. Верни только JSON: '
             '{"intent":"search|chat|analysis","category":"garage|apartment|house|land|commercial|car",'
             '"query":"точные ключевые слова без бюджета и города","locality":"город или район либо пусто",'
@@ -226,7 +243,7 @@ def _turn(store, config, user_id, text, selected_id):
     report = None
     if selected:
         if plan['intent'] == 'analysis':
-            report = analyze(assess(selected, pool, replace(config.search, category=selected.category)), store) if connected else None
+            report = analyze(assess(selected, pool, replace(config.search, category=selected.category)), store) if model else None
         else: report = json.loads(store.get_state('advisor:' + selected.id, 'null'))
     if plan['intent'] == 'clarify':
         answer = ('Понял: ищем помещение для табачного магазина, а не объявления с упоминанием табака. '
@@ -235,7 +252,7 @@ def _turn(store, config, user_id, text, selected_id):
         if plan.get('deal') == 'rent':
             answer = ('Понял, нужна аренда помещения под табачный магазин. Автоматическая выдача сейчас настроена на продажу, поэтому не буду показывать её вместо аренды. '
                       'Могу помочь составить требования к помещению и разобрать объявление, которое ты пришлёшь. Поиск аренды — пока неподключённая возможность.')
-    elif connected and model:
+    elif model:
         needs_web = plan['intent'] != 'search' and bool(CURRENT_FACTS.search(text))
         instructions = (
             'Ты внимательный деловой собеседник и аналитик по недвижимости, автомобилям, личным финансам и малому бизнесу. '
@@ -259,7 +276,7 @@ def _turn(store, config, user_id, text, selected_id):
                    'selected': selected.to_dict() if selected else None, 'analysis': report,
                    'price_range': [results[0].listing.price_rub, results[-1].listing.price_rub] if results else None}
         try:
-            response = chatgpt.respond(instructions, [{'type': 'input_text', 'text': json.dumps(payload, ensure_ascii=False)}],
+            response = respond(instructions, [{'type': 'input_text', 'text': json.dumps(payload, ensure_ascii=False)}],
                 model=model, web=needs_web, require_web=needs_web, timeout=60)
             answer = response['text'][:4000]
             citations = [c for c in response.get('citations', []) if str(c.get('url', '')).startswith('https://')
@@ -269,7 +286,7 @@ def _turn(store, config, user_id, text, selected_id):
                 else: raise RemoteError()
         except RemoteError:
             if not needs_web: raise
-            response = chatgpt.respond(instructions + ' Веб-проверка сейчас недоступна. Дай общую схему действий без конкретных актуальных ставок, сроков и правовых утверждений. Ясно отметь это ограничение.',
+            response = respond(instructions + ' Веб-проверка сейчас недоступна. Дай общую схему действий без конкретных актуальных ставок, сроков и правовых утверждений. Ясно отметь это ограничение.',
                 [{'type': 'input_text', 'text': json.dumps(payload, ensure_ascii=False)}], model=model, timeout=60)
             answer = response['text'][:3500] + '\n\nАктуальные нормы сейчас не проверены: веб-поиск не ответил.'
     else:

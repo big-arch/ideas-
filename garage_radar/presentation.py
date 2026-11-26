@@ -29,13 +29,21 @@ def caption(result: Assessment) -> str:
         address = ", ".join(part for part in (item.locality, item.district.replace("улица: ", "")) if part)
     elif item.locality not in address:
         address = item.locality + ", " + address
+    facts = []
+    if item.area_m2:
+        facts.extend([f"{item.area_m2:g} м²", money(item.price_rub / item.area_m2) + "/м²"])
+    for key, label in (("year", "г."), ("mileage_km", "км"), ("rooms", "комн.")):
+        if key in item.attributes: facts.append(f"{item.attributes[key]:g} {label}" if isinstance(item.attributes[key], (int,float)) else f"{item.attributes[key]} {label}")
+    if item.category == "garage" and item.garage_type in {"parking","capital","metal"}:
+        facts.append({"parking":"машино-место","capital":"капитальный","metal":"металлический"}[item.garage_type])
     lines = (["<i>Демонстрация, вымышленные данные</i>"] if item.demo else []) + [
         f"<b>{escape(item.title[:160])}</b>",
         f"<b>{escape(money(item.price_rub))}</b>",
-        "", "📍 " + escape(address[:220]), "", "<b>" + escape(price_label(result)) + "</b>",
+        *([escape(" · ".join(facts))] if facts else []),
+        "📍 " + escape(address[:185]), "", "<b>" + escape(price_label(result)) + "</b>",
     ]
     if result.reference_price is not None and result.status not in {"insufficient", "excluded"}:
-        lines.append(f"Похожие предложения: около {money(result.reference_price)} · {len(result.comparable_ids)} аналогов")
+        lines.append(f"Ориентир {money(result.reference_price)} · {len(result.comparable_ids)} аналогов")
         lines.append("<i>Предварительно, по городу, без поправки на район</i>" if result.comparison_scope == "city"
                      else "<i>Предварительно, по ценам объявлений</i>")
     if normalized(item.locality) != "ростов-на-дону":
@@ -44,17 +52,11 @@ def caption(result: Assessment) -> str:
         lines.append("Срочная продажа, по словам продавца")
     if item.attributes.get("site_date_at"):
         try:
-            lines.append("Дата на сайте: " + timestamp(item.attributes["site_date_at"]).astimezone(MSK).strftime("%d.%m.%Y"))
+            published = timestamp(item.attributes["site_date_at"]).astimezone(MSK)
+            seen = timestamp(item.observed_at).astimezone(MSK)
+            lines.extend(["", f"<i>Дата на сайте {published:%d.%m} · в каталоге {seen:%d.%m %H:%M} МСК</i>"])
         except (ValueError, TypeError):
             pass
-    facts = []
-    if item.area_m2: facts.append(f"{item.area_m2:g} м²")
-    for key, label in (("year", "год"), ("mileage_km", "км"), ("rooms", "комнат")):
-        if key in item.attributes: facts.append(f"{item.attributes[key]} {label}")
-    if item.category == "garage":
-        facts.append({"parking": "машино-место", "capital": "капитальный", "metal": "металлический"}.get(item.garage_type, "тип не уточнён"))
-    if facts: lines.insert(3, escape(" · ".join(facts)))
-    lines.append("<i>Характеристики, текст и разбор — в кнопках ниже</i>")
     return "\n".join(lines)
 
 
@@ -77,9 +79,9 @@ def full_card(result: Assessment, detail: dict) -> str:
 def ranked_feed(pool: list[Listing], search: Search, minimum_discount: float | None = None,
                 *, recent_days: int | None = None, sort_mode: str = "discount") -> list[Assessment]:
     now = utc_now()
-    results = [assess(item, pool, search, now) for item in pool if in_scope(item, search, now) and not item.demo]
-    if recent_days is not None:
-        results = [r for r in results if recent(r.listing, now, recent_days)]
+    eligible = [item for item in pool if not item.demo and in_scope(item, search, now)]
+    results = [assess(item, eligible, search, now) for item in eligible
+               if recent_days is None or recent(item, now, recent_days)]
     if minimum_discount is not None:
         results = [r for r in results if r.status not in {"insufficient", "excluded"}
                    and r.discount is not None and r.discount + 1e-12 >= minimum_discount]
@@ -104,6 +106,8 @@ def ranked_feed(pool: list[Listing], search: Search, minimum_discount: float | N
 def recent(item: Listing, now, days: int = 7) -> bool:
     try:
         published = timestamp(item.attributes.get("site_date_at", ""))
-        return timedelta(0) <= now - published <= timedelta(days=days)
+        first_seen = item.attributes.get("first_seen_at")
+        return (timedelta(0) <= now - published <= timedelta(days=days) and
+                (not first_seen or now - timestamp(first_seen) <= timedelta(days=days)))
     except (ValueError, TypeError, AttributeError):
         return False

@@ -79,8 +79,23 @@ class Store:
 
     def all(self) -> list[Listing]:
         with self.connection() as db:
-            rows = db.execute("SELECT payload FROM listings").fetchall()
-        return [Listing.from_dict(json.loads(row[0])) for row in rows]
+            rows = db.execute("SELECT payload, (SELECT min(observed_at) FROM prices WHERE listing_id=listings.id) "
+                              "FROM listings").fetchall()
+        items = []
+        for payload, first_seen in rows:
+            value = json.loads(payload)
+            attributes = value.get("attributes", {})
+            if first_seen and attributes.get("source_scope") == "partial_catalog":
+                attributes["first_seen_at"] = first_seen
+            items.append(Listing.from_dict(value))
+        return items
+
+    def mark_withdrawn(self, item: Listing) -> None:
+        """Do not overwrite a newer observation that arrived during the page request."""
+        with self.connection() as db:
+            db.execute("UPDATE listings SET payload=json_set(payload,'$.active',json('false')) "
+                       "WHERE id=? AND url=? AND json_extract(payload,'$.observed_at')=?",
+                       (item.id, item.url, item.observed_at))
 
     def history(self, listing_id: str) -> list[tuple]:
         with self.connection() as db:
@@ -163,6 +178,13 @@ class Store:
     def claim_state(self, key: str, value: str) -> bool:
         with self.connection() as db:
             return db.execute("INSERT OR IGNORE INTO state VALUES (?, ?)", (key, value)).rowcount == 1
+
+    def claim_digest_slot(self, key: str, now: int) -> bool:
+        with self.connection() as db:
+            claimed = db.execute("INSERT INTO state(key,value) VALUES (?, 'sending') "
+                "ON CONFLICT(key) DO UPDATE SET value='sending' WHERE state.value LIKE 'empty:%' "
+                "AND CAST(substr(state.value,7) AS INTEGER)<=?", (key, now))
+            return claimed.rowcount == 1
 
     def subscribe(self, chat_id: int, enabled: bool) -> None:
         with self.connection() as db:

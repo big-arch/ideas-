@@ -16,6 +16,15 @@ from test_radar import listing
 
 
 class ConversationTests(unittest.TestCase):
+    def test_local_model_handles_a_follow_up_without_cloud_or_web(self):
+        with patch.dict("os.environ", {"OLLAMA_MODEL":"test-local"}), patch("garage_radar.conversation.chatgpt.status",return_value={"connected":False}), patch("garage_radar.conversation.post_json",side_effect=[
+                {"message":{"content":json.dumps({"intent":"chat","category":"car"})}},
+                {"message":{"content":"Попроси сервисную историю перед осмотром."}}]) as local, patch("garage_radar.conversation.SOURCE.fetch") as fetch:
+            reply = turn(self.store,self.config,123,"Что проверить на осмотре машины?")
+            fetch.assert_not_called()
+            self.assertIn("сервисную историю",reply["answer"])
+            self.assertEqual(local.call_count,2)
+
     def test_tobacco_premises_is_a_use_case_not_a_literal_keyword(self):
         raw = validate_plan({'intent': 'search', 'category': 'commercial', 'query': 'табачная продукция'})
         plan = ground_plan(raw, 'я хочу помещение под табачную продукцию', {})

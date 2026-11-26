@@ -11,6 +11,9 @@ def due_slot(mode: str, now: datetime) -> str | None:
     if now.tzinfo is None:
         raise ValueError("Нужен часовой пояс")
     local = now.astimezone(MOSCOW)
+    if mode == "twelve":
+        # A wake-up can deliver the current two-hour edition, never yesterday's backlog.
+        return local.replace(hour=local.hour - local.hour % 2).strftime("%Y-%m-%dT%H:00+03:00")
     # A stopped PC does not trigger a flood of catch-up digests.
     if local.hour in SCHEDULES.get(mode, ()) and local.minute < 30:
         return local.strftime("%Y-%m-%dT%H:00+03:00")

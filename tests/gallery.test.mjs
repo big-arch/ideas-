@@ -35,3 +35,18 @@ test('late response never replaces another listing gallery',async()=>{
   await r.run("watchGallery('one',1)");
   assert.equal(renders,0);assert.equal(r.run('currentDetail.detail.photos[0]'),'other');
 });
+
+test('closed and expired offers disappear even if the browser holds an old list',()=>{
+  const r=runtime();
+  assert.equal(r.run("currentlyVisible({active:false})"),false);
+  assert.equal(r.run("currentlyVisible({available_until:'2001-01-01T00:00:00Z'})"),false);
+  assert.equal(r.run("currentlyVisible({available_until:new Date(Date.now()+60000).toISOString()})"),true);
+});
+
+test('numbered and markdown AI sections display an independent brief',()=>{
+  const r=runtime();
+  const report={text:'1. Краткий вывод\nИзмерить ворота.\n\n## 2. Цена и аналоги\nДва аналога.'};
+  r.context.sample=report;
+  assert.equal(r.run('brief(sample)'),'Измерить ворота.');
+  assert.equal(r.run('reportSections(sample)[1].title'),'Цена и аналоги');
+});
