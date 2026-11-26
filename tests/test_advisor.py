@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from garage_radar.advisor import REPORT_VERSION, analyze, current_report, decision_facts
+from garage_radar.advisor import REPORT_VERSION, analyze, current_report, decision_facts, listing_signature
 from garage_radar.analysis import assess
 from garage_radar.config import Search
 from garage_radar.storage import Store
@@ -13,6 +13,14 @@ from test_radar import listing, peers
 
 
 class AdvisorTests(unittest.TestCase):
+    def test_rotating_image_host_does_not_invalidate_a_finished_analysis(self):
+        a = "https://s31.auto.drom.ru/photo/v2/one/gen1200.jpg"
+        b = a.replace("s31.", "s12.").replace("gen1200","gen320")
+        first = listing(photo_url=a,attributes={"photo_urls":[a]})
+        second = replace(first, photo_url=b,attributes={"photo_urls":[b]})
+        self.assertEqual(listing_signature(first),listing_signature(second))
+        self.assertNotEqual(listing_signature(first),listing_signature(replace(second,photo_url=b.replace("/one/","/different/"))))
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.store=Store(Path(self.tmp.name)/"test.sqlite3")
         self.store.set_state("chatgpt_model","account-model")

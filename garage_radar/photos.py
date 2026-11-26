@@ -20,6 +20,9 @@ def image_size(url):
 def photo_identity(url):
     parsed = urlsplit(url)
     host, path = parsed.hostname or '', parsed.path
+    # Drom rotates s12/s31/etc for the same object path between catalog reads.
+    if re.fullmatch(r's\d+\.auto\.drom\.ru', host):
+        host = 'media.auto.drom.ru'
     if host == 'avatars.mds.yandex.net' or host.endswith('.auto.drom.ru'):
         return host, path.rsplit('/', 1)[0]
     if host == 'data.akula.com':

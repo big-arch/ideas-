@@ -10,7 +10,7 @@ from . import chatgpt
 from .analysis import money, render
 from .avito import SourceUnavailable
 from .details import read_detail
-from .photos import catalog_photos
+from .photos import catalog_photos, photo_identity
 from .models import utc_now, timestamp
 from .network import photo_bytes, post_json, RemoteError
 from .presentation import price_label
@@ -36,7 +36,9 @@ def price_evidence(result):
 def listing_signature(item):
     values = item.to_dict()
     values.pop("observed_at")
-    values["attributes"] = {key: value for key, value in item.attributes.items() if key not in {"site_date_label", "first_seen_at"}}
+    values["photo_url"] = photo_identity(item.photo_url)
+    values["attributes"] = {key: value for key, value in item.attributes.items() if key not in {"site_date_label", "first_seen_at", "photo_urls"}}
+    values["photos"] = [photo_identity(url) for url in catalog_photos(item)]
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
@@ -159,6 +161,7 @@ def analyze(result, store) -> dict:
                   "photos": catalog_photos(item), "scope": "catalog"}
     stable_item = listing_signature(item)
     stable_detail = {k: v for k, v in detail.items() if k != "fetched_at"}
+    stable_detail["photos"] = [photo_identity(url) for url in detail["photos"]]
     facts = decision_facts(result, store)
     fingerprint = hashlib.sha256(json.dumps([REPORT_VERSION,stable_item, stable_detail, model,price_evidence(result),sorted(result.comparable_ids),facts], sort_keys=True).encode()).hexdigest()
     key = "advisor:" + item.id
