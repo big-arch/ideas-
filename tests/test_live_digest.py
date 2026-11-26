@@ -64,6 +64,38 @@ class LiveDigestTests(unittest.TestCase):
         self.assertEqual(len(self.api.messages), 14)
         self.assertIn("отправлено 14", self.store.get_state("digest_last:123"))
 
+    def test_late_property_sources_complete_existing_car_edition_only_for_subscribed_categories(self):
+        self.enable_full()
+        self.store.set_state("digest_categories:123", "car,house,garage")
+        now = utc_now()
+        car = support.listing(identity="firstcar", category="car")
+        self.store.upsert([car])
+        self.bot.send_full_edition(123, "slot", int(now.timestamp()))
+        key = "digest_all_slot:123:slot"
+        self.assertEqual(self.store.edition_categories(123, key), {"car"})
+        house = support.listing(identity="newhouse", category="house")
+        garage = support.listing(identity="newgarage", category="garage")
+        other = support.listing(identity="anothercar", category="car")
+        self.store.upsert([house, other, support.listing(identity="excludedland", category="land")])
+        self.bot.send_full_edition(123, "slot", int(now.timestamp()))
+        self.assertEqual(len(self.api.messages), 1)
+        later = now + timedelta(seconds=self.bot.config.source_refresh_seconds + 1)
+        with patch("garage_radar.bot.utc_now", return_value=later):
+            self.bot.send_full_edition(123, "slot", int(later.timestamp()))
+        self.assertEqual(self.store.delivered_ids(123, []), {car.id, house.id})
+        self.store.upsert([garage])
+        # Migration of a partially delivered slot written by the old version.
+        self.store.set_state(key, "sent:2")
+        with patch("garage_radar.bot.utc_now", return_value=later):
+            self.bot.send_full_edition(123, "slot", int(later.timestamp()))
+            self.bot.send_full_edition(123, "slot", int(later.timestamp()))
+        self.assertEqual(self.store.delivered_ids(123, []), {car.id, house.id, garage.id})
+        self.assertEqual(len(self.api.messages), 3)
+        self.assertIn("Гаражи · 1", self.bot.delivery_summary(123))
+        self.assertNotIn("Участки", self.bot.delivery_summary(123))
+        self.bot.send_full_edition(123, "next", int(later.timestamp()))
+        self.assertEqual(self.store.delivered_ids(123, []), {car.id, house.id, garage.id, other.id})
+
     def test_full_edition_respects_flood_wait_and_does_not_replay_an_unknown_send(self):
         self.enable_full()
         self.store.upsert([support.listing(identity=f"new{i}",price=100000+i) for i in range(4)])

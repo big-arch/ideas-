@@ -254,6 +254,19 @@ class Store:
             return db.execute("SELECT count(*) FROM delivery_attempts WHERE chat_id=? AND edition=? AND confirmed=1",
                               (chat_id, edition)).fetchone()[0]
 
+    def edition_categories(self, chat_id: int, edition: str) -> set[str]:
+        with self.connection() as db:
+            rows = db.execute("SELECT DISTINCT json_extract(l.payload, '$.category') FROM delivery_attempts d "
+                              "JOIN listings l ON l.id=d.listing_id WHERE d.chat_id=? AND d.edition=? AND d.confirmed=1",
+                              (chat_id, edition))
+            return {row[0] for row in rows}
+
+    def delivery_counts_since(self, chat_id: int, since: str) -> dict[str, int]:
+        with self.connection() as db:
+            return dict(db.execute("SELECT json_extract(l.payload,'$.category'), count(*) FROM sent_objects s "
+                                   "JOIN listings l ON l.id=s.listing_id WHERE s.chat_id=? AND s.delivered_at>=? "
+                                   "GROUP BY json_extract(l.payload,'$.category')", (chat_id, since)))
+
     def mark_delivered(self, chat_id: int, item: Listing) -> None:
         with self.connection() as db:
             db.execute('INSERT OR IGNORE INTO sent_objects VALUES (?,?,?,?)',

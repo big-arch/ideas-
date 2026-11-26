@@ -6,6 +6,8 @@ from urllib.parse import urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen, build_opener, ProxyHandler
 
+from .photos import supported_photo
+
 
 class RemoteError(RuntimeError):
     def __init__(self, status: int = 0, retry_after: int = 5):
@@ -43,16 +45,15 @@ def post_json(url: str, payload: dict, timeout: int = 45) -> dict:
 
 
 def photo_bytes(url: str) -> tuple[bytes, str]:
-    """Only images hosted by the three supported public catalogs."""
+    """Download original listing photos from supported public catalogs."""
     host = urlsplit(url).hostname or ""
-    if not url.startswith("https://") or not (host == "img.avito.st" or host.endswith(".img.avito.st")
-            or host == "avatars.mds.yandex.net" or host.endswith(".auto.drom.ru") or host == "data.akula.com"):
+    if not supported_photo(url):
         raise RemoteError(400)
     try:
         opener = build_opener(ProxyHandler({})).open if host == "data.akula.com" else urlopen
         with opener(url, timeout=20) as response:
             final_host = urlsplit(response.url).hostname
-            if final_host != host:
+            if final_host != host or not supported_photo(response.url):
                 raise RemoteError(400)
             kind = response.headers.get_content_type()
             data = response.read(8_000_001)

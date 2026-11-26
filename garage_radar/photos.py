@@ -30,18 +30,26 @@ def photo_identity(url):
     return host, path
 
 
+def supported_photo(url):
+    parsed = urlsplit(url)
+    host = parsed.hostname or ''
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    return (parsed.scheme == 'https' and not parsed.username and not parsed.password and port in (None, 443)
+            and (host == 'img.avito.st' or host.endswith('.img.avito.st')
+                 or host == 'avatars.mds.yandex.net' or host.endswith('.auto.drom.ru') or host == 'data.akula.com'
+                 or host == 'www.ayax.ru' and re.fullmatch(r'/images/data/realty/\d+/[a-zA-Z0-9_-]+\.(?:jpe?g|png|webp)', parsed.path)
+                 or re.fullmatch(r'[a-z0-9-]+\.restate\.ru', host) and re.fullmatch(r'/uploads/\d\d/\d\d/\d\d/[a-z]_\d+\.(?:jpe?g|png|webp)', parsed.path)))
+
+
 def listing_photos(values, base_url=''):
     result, positions = [], {}
     for value in values:
         if not isinstance(value, str) or len(value) > 2500: continue
         url = urljoin(base_url, value)
-        parsed = urlsplit(url)
-        host = parsed.hostname or ''
-        try: port = parsed.port
-        except ValueError: continue
-        if (parsed.scheme != 'https' or parsed.username or parsed.password or port not in (None, 443)
-                or not (host == 'img.avito.st' or host.endswith('.img.avito.st')
-                        or host == 'avatars.mds.yandex.net' or host.endswith('.auto.drom.ru') or host == 'data.akula.com')):
+        if not supported_photo(url):
             continue
         identity = photo_identity(url)
         if identity in positions:

@@ -25,7 +25,7 @@ from .demo import demo_listings
 from .models import CATEGORIES, utc_now, timestamp
 from .presentation import caption, ranked_feed, recent, full_card
 from .network import RemoteError, post_json, photo_bytes, post_photos
-from .sources import PublicCatalog, source_name, AKULA_PATHS, PUBLIC_SOURCES
+from .sources import PublicCatalog, source_name, CATALOG_PATHS, PUBLIC_SOURCES
 from .schedule import SCHEDULE_LABELS, due_slot, MOSCOW
 from .storage import Store, load_jsonl
 from .workspace import STAGES, VIEWS, active_profile, filter_results, matches_profile, validate_profile, watched
@@ -192,7 +192,10 @@ class Bot:
         if config.source == "public_catalogs":
             self.sources += [("Яндекс Недвижимость", PublicCatalog("yandex", config.source_refresh_seconds)),
                              ("Дром", PublicCatalog("drom", config.source_refresh_seconds)),
-                             ("Акула", PublicCatalog("akula", config.source_refresh_seconds))]
+                             ("Акула", PublicCatalog("akula", config.source_refresh_seconds)),
+                             ("Аякс", PublicCatalog("ayax", config.source_refresh_seconds)),
+                             ("Restate", PublicCatalog("restate", config.source_refresh_seconds,
+                                                       detail_reader=lambda item: read_detail(item, store)))]
 
     def chat_message(self, chat_id, text):
         with self.advisor_lock:
@@ -364,9 +367,17 @@ class Bot:
         text = ("📬 Твои сводки\n\n" + SCHEDULE_LABELS.get(mode, SCHEDULE_LABELS["off"]) + " · МСК\n"
                 + ("Все новые объявления автоматически" if full else "До 10 объектов в каждой автосводке") +
                 "\n\nКатегории: " + ", ".join(CATEGORIES[c] for c in categories) +
+                "\n\n" + self.delivery_summary(chat_id) +
                 "\nПоследняя проверка · " + self.store.get_state(f"digest_last:{chat_id}", "ожидается") +
                 "\n\nВыбери категории для рассылки. Если новых подтверждённых объектов нет, бот дождётся следующего обновления.")
         self.telegram.send(chat_id, text, keyboard)
+
+    def delivery_summary(self, chat_id: int) -> str:
+        now = utc_now()
+        midnight = now.astimezone(MOSCOW).replace(hour=0, minute=0, second=0, microsecond=0)
+        counts = self.store.delivery_counts_since(chat_id, midnight.astimezone(now.tzinfo).isoformat())
+        return "Доставлено сегодня · МСК\n" + "\n".join(
+            f"{CATEGORIES[c]} · {counts.get(c, 0)}" for c in self.digest_categories(chat_id))
 
     def sort_mode(self, chat_id: int) -> str:
         mode = self.store.get_state(f"sort:{chat_id}", "price_asc")
@@ -377,11 +388,11 @@ class Bot:
                 (("newest", "🕒 Новые"), ("price_asc", "Цена ↑"), ("price_desc", "Цена ↓"))]
 
     def send_digest(self, chat_id: int, *, automatic: bool = False, offset: int = 0, token: str = "",
-                    edition: str = "", can_continue=None) -> int:
+                    edition: str = "", can_continue=None, categories_override=None) -> int:
         pool = self.store.all()
         delivered = self.store.delivered_ids(chat_id,pool)
         state_key = f"digest_snapshot:{chat_id}"
-        categories = self.digest_categories(chat_id)
+        categories = self.digest_categories(chat_id) if categories_override is None else categories_override
         context = [categories, self.sort_mode(chat_id)]
         if token:
             try:
@@ -481,13 +492,32 @@ class Bot:
         if int(self.store.get_state(pause_key, "0")) > now:
             return
         key = f"digest_all_slot:{chat_id}:{slot}"
+        categories = self.digest_categories(chat_id)
+        previous = self.store.get_state(key)
+        parts = previous.split(":")
+        covered = set()
+        if parts[0] == "sent":
+            # Older releases closed the entire edition as soon as any category arrived.
+            covered = set(parts[2].split(",")) if len(parts) > 2 else self.store.edition_categories(chat_id, key)
+        elif parts[0] in {"empty", "sending"}:
+            if int(parts[1]) > now:
+                return
+            pos = 3 if parts[0] == "sending" else 2
+            if len(parts) > pos:
+                covered = set(parts[pos].split(","))
+        elif previous:
+            return
+        pending = [category for category in categories if category not in covered]
+        if not pending:
+            return
+        coverage = ",".join(c for c in CATEGORIES if c in covered)
         token = secrets.token_hex(8)
-        claim = f"sending:{now + 180}:{token}"
-        if not self.store.claim_digest_slot(key, now, claim):
+        claim = f"sending:{now + 180}:{token}:{coverage}"
+        owned = self.store.replace_claim(key, previous, claim) if previous else self.store.claim_state(key, claim)
+        if not owned:
             return
         renew_at = now + 60
         schedule = self.store.get_state(f"schedule:{chat_id}")
-        categories = self.digest_categories(chat_id)
         def can_continue():
             nonlocal claim, renew_at
             if (chat_id not in self.store.subscribers() or self.store.get_state(f"schedule:{chat_id}") != schedule
@@ -496,19 +526,21 @@ class Bot:
                 return False
             clock = int(utc_now().timestamp())
             if clock >= renew_at:
-                renewed = f"sending:{clock + 180}:{token}"
+                renewed = f"sending:{clock + 180}:{token}:{coverage}"
                 if not self.store.replace_claim(key, claim, renewed):
                     return False
                 claim, renew_at = renewed, clock + 60
             return True
+        before = self.store.edition_count(chat_id, key)
         try:
-            self.send_digest(chat_id, automatic=True, edition=key, can_continue=can_continue)
+            self.send_digest(chat_id, automatic=True, edition=key, can_continue=can_continue, categories_override=pending)
             count = self.store.edition_count(chat_id, key)
-            if count and can_continue():
-                state, note = f"sent:{count}", f"отправлено {count}"
-            else:
-                state = f"empty:{int(utc_now().timestamp()) + self.config.source_refresh_seconds}"
-                note = f"отправлено {count}" if count else "нет новых подтверждённых объектов"
+            if can_continue():
+                covered.update(self.store.edition_categories(chat_id, key))
+                coverage = ",".join(c for c in CATEGORIES if c in covered)
+            retry_at = int(utc_now().timestamp()) + self.config.source_refresh_seconds
+            state = f"sent:{count}:{coverage}" if set(categories) <= covered else f"empty:{retry_at}:{coverage}"
+            note = f"отправлено {count}" if count else "нет новых подтверждённых объектов"
         except RemoteError as error:
             if error.status == 403:
                 self.store.subscribe(chat_id, False)
@@ -517,11 +549,11 @@ class Bot:
                 resume_at = int(utc_now().timestamp()) + error.retry_after
                 if error.status == 429:
                     self.store.set_state(pause_key, str(resume_at))
-                state = f"empty:{resume_at}"
+                state = f"empty:{resume_at}:{coverage}"
                 note = "Telegram не подтвердил доставку, продолжу рассылку после паузы"
         if self.store.replace_claim(key, claim, state):
             self.store.set_state(f"digest_last:{chat_id}", utc_now().astimezone(MOSCOW).strftime("%d.%m %H:%M МСК") + " · " + note)
-            if self.store.edition_count(chat_id, key):
+            if self.store.edition_count(chat_id, key) > before:
                 self.store.set_state(f"digest_sent:{chat_id}", utc_now().isoformat())
 
     def search_for(self, chat_id: int):
@@ -837,7 +869,7 @@ class Bot:
             source = ", ".join(name for name, _ in self.sources) if self.sources else "Импорт файла"
             states = []
             for name, adapter in self.sources:
-                if name == "Акула" and search.category not in AKULA_PATHS or name == "Дром" and search.category != "car" or name == "Яндекс Недвижимость" and search.category == "car":
+                if isinstance(adapter, PublicCatalog) and search.category not in CATALOG_PATHS[adapter.name]:
                     continue
                 states.append(self.store.get_state(f"source_status:{name}:{search.category}", name + ": ожидается проверка этой категории"))
             last = self.store.get_state(f'digest_last:{chat_id}', 'ещё не отправлялась')
@@ -846,7 +878,8 @@ class Bot:
             account = chatgpt.status()
             ai = "ChatGPT подключён; фото, текст и поиск по району" if account.get('connected') else ("Ollama · резервный текстовый разбор" if self.model else "не подключён")
             self.telegram.send(chat_id, f"{CATEGORIES[search.category]} · объявлений в базе: {count}\nИсточники: {source}\n"
-                               + "\n".join(states) + f"\nОхват: первые страницы каталогов; свежая подборка — до 7 дней по дате сайта.\nПоследняя сводка: {last}\nИИ: {ai}")
+                               + "\n".join(states) + f"\nОхват: первые страницы каталогов; свежая подборка — до 7 дней по дате сайта.\nПоследняя сводка: {last}\n\n"
+                               + self.delivery_summary(chat_id) + f"\n\nИИ: {ai}")
         elif command == "/digest":
             self.show_feed(chat_id)
         elif command == "/discount":
@@ -929,10 +962,10 @@ class Bot:
                                 f"{name}: прочитано {len(items)}, за неделю {fresh} · " + utc_now().astimezone(MOSCOW).strftime('%d.%m %H:%M МСК'))
                             self.store.set_state(f"source_success:{name}:{category}", "последний успех " + utc_now().astimezone(MOSCOW).strftime('%d.%m %H:%M МСК'))
                             LOG.info("Public catalog imported, source %s, category %s, records %s", name, category, len(items))
-                    except SourceUnavailable:
-                        self.store.set_state("source_status:" + name, name + ": временно недоступен, сохранённые данные доступны")
+                    except SourceUnavailable as error:
+                        self.store.set_state("source_status:" + name, f"{name} · {error}")
                         previous = self.store.get_state(f"source_success:{name}:{category}")
-                        self.store.set_state(f"source_status:{name}:{category}", name + ": временно недоступен; сохранённые данные доступны" + (" · " + previous if previous else ""))
+                        self.store.set_state(f"source_status:{name}:{category}", f"{name} · {error}" + (" · " + previous if previous else ""))
                         LOG.warning("Public catalog unavailable, source %s, category %s", name, category)
         if self.config.feed_file:
             try:

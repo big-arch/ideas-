@@ -29,6 +29,10 @@ class SourceUnavailable(RuntimeError):
     pass
 
 
+class DetailSourceUnavailable(SourceUnavailable):
+    """The marketplace temporarily restricts access to its listing pages."""
+
+
 @dataclass
 class Card:
     id: str

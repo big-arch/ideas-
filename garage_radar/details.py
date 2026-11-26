@@ -8,7 +8,8 @@ from urllib.parse import urlsplit, urljoin
 from urllib.request import urlopen, build_opener, ProxyHandler
 from urllib.error import HTTPError, URLError
 
-from .avito import VOID, SourceUnavailable
+from .avito import VOID, SourceUnavailable, DetailSourceUnavailable
+from . import ayax, restate
 from .models import Listing, utc_now, timestamp
 from .photos import GALLERY_VERSION, catalog_photos, listing_photos, image_values, image_attribute
 from .sources import PUBLIC_SOURCES
@@ -16,10 +17,6 @@ from .sources import PUBLIC_SOURCES
 
 class ListingWithdrawn(SourceUnavailable):
     """The marketplace explicitly closed this listing."""
-
-
-class DetailSourceUnavailable(SourceUnavailable):
-    """This host is rate-limited or unavailable."""
 
 
 def page_identity(url):
@@ -85,6 +82,15 @@ class DetailParser(HTMLParser):
 
 
 def parse_detail(document: str, item: Listing) -> dict:
+    if item.attributes.get("source") == "restate_public_html":
+        return restate.parse_detail(document, item)
+    if item.attributes.get("source") == "ayax_public_html":
+        record = ayax.detail_record(document, item)
+        if record is None:
+            raise ListingWithdrawn("Аякс снял объявление с публикации")
+        return dict(description=record.description, params="", photos=catalog_photos(record), availability="active",
+                    source_price=record.price_rub, gallery_version=GALLERY_VERSION, url=item.url,
+                    fetched_at=utc_now().isoformat(), scope="detail")
     parser = DetailParser()
     parser.feed(document)
     if parser.canonical and page_identity(urljoin(item.url, parser.canonical)) != page_identity(item.url):
@@ -139,11 +145,14 @@ def read_detail(item: Listing, store, *, refresh: bool = False, max_age: int = 2
                 return data
         except (ValueError, KeyError): pass
     host = urlsplit(item.url).hostname
-    if host not in {"avito.ru", "www.avito.ru", "realty.yandex.ru", "auto.drom.ru", "rostov.akula.com"}:
+    if host not in {"avito.ru", "www.avito.ru", "realty.yandex.ru", "auto.drom.ru", "rostov.akula.com"} and not (
+            item.attributes.get("source") == "ayax_public_html" and ayax.listing_url(item.url) or
+            item.attributes.get("source") == "restate_public_html" and restate.garage_id(item.url)):
         raise SourceUnavailable("Источник полной страницы не поддерживается")
     try:
         opener = build_opener(ProxyHandler({})).open if host == "rostov.akula.com" else urlopen
-        with opener(item.url, timeout=25) as response:
+        url = item.url.rstrip("/") + "/" if item.attributes.get("source") in {"ayax_public_html", "restate_public_html"} else item.url
+        with opener(url, timeout=25) as response:
             if urlsplit(response.url).scheme != "https" or page_identity(response.url) != page_identity(item.url):
                 raise SourceUnavailable("Источник перенаправил на другую страницу")
             body = response.read(8_000_001)
@@ -163,6 +172,8 @@ def read_detail(item: Listing, store, *, refresh: bool = False, max_age: int = 2
             raise DetailSourceUnavailable("Источник временно ограничил доступ к карточкам") from None
         raise SourceUnavailable("Источник пока не подтвердил доступность страницы") from None
     except (URLError, OSError, UnicodeError):
+        if item.attributes.get("source") in {"ayax_public_html", "restate_public_html"}:
+            raise SourceUnavailable("Не удалось прочитать страницу этого объекта") from None
         raise DetailSourceUnavailable("Полная страница временно недоступна") from None
 
 
@@ -172,6 +183,8 @@ def confirmed_for_digest(item: Listing, store) -> bool:
     if item.attributes.get("source") not in PUBLIC_SOURCES:
         return True  # Imported feeds have their own publication and active fields.
     pause_key = "digest_page_pause:" + item.attributes["source"]
+    if item.attributes["source"] in {"ayax_public_html", "restate_public_html"}:
+        pause_key += ":" + (urlsplit(item.url).hostname or "")
     if float(store.get_state(pause_key, "0")) > utc_now().timestamp():
         return False
     try:
@@ -183,6 +196,6 @@ def confirmed_for_digest(item: Listing, store) -> bool:
         return False
     status = page["availability"]
     price = page["source_price"]
-    if item.attributes.get("source") == "drom_public_html":
+    if item.attributes.get("source") in {"drom_public_html", "ayax_public_html", "restate_public_html"}:
         return status == "active" and price == item.price_rub
     return status in {"active", "page_visible"} and (price is None or price == item.price_rub)
